@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anvil-lang"
+version = "0.2.0"
+description = "A small language for differentiable tensor programs that compiles to ARM64 assembly or CUDA"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["numpy", "pytest"]
+python = ["numpy"]          # anvil.function
+
+[project.scripts]
+anvil = "anvil.cli:main"
+
+[tool.setuptools]
+packages = ["anvil", "anvil.backend"]
+
+[tool.setuptools.package-data]
+anvil = ["prelude.anvil"]
+"anvil.backend" = ["runtime.s", "anvil_cuda.h", "anvil_host.h", "anvil_metal.h"]

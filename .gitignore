@@ -1,0 +1,33 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+# compiled Anvil programs (anvil build / anvil asm write next to the source)
+examples/*.s
+examples/hello
+examples/linear_regression
+examples/spirals
+examples/softmax_regression
+examples/mnist
+examples/cnn
+examples/attention
+examples/snake
+examples/checkers
+.DS_Store
+
+# trained models saved by programs (`save`)
+*.weights
+
+# packaged editor extensions (python3 editors/vscode/package_vsix.py) and generated CUDA files
+*.vsix
+examples/*.cu
+
+# EMNIST (downloaded from NIST; 203 MB)
+examples/data/emnist/
+
+# PyTorch, for benchmarks/vs_pytorch (python3 -m venv benchmarks/.venv-torch)
+benchmarks/.venv-torch/
+benchmarks/vs_pytorch/data/
+benchmarks/vs_pytorch/build/
