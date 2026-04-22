@@ -1,0 +1,147 @@
+# prelude.anvil — the Anvil standard library, written in Anvil.
+#
+# Everything here is ordinary Anvil code: read it, copy it, change it.
+# Index names on the left of `=` are outputs; any other index is summed/maxed by the
+# reduction that encloses it. `...` stands for "all leading dimensions".
+
+# ------------------------------------------------------------------ activations
+
+fn relu(x) = max(x, 0)
+fn leaky_relu(x, slope = 0.01) = max(x, slope * x)
+fn elu(x, alpha = 1.0) = x if x > 0 else alpha * (exp(x) - 1)
+fn gelu(x) = 0.5 * x * (1 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)))
+fn silu(x) = x * sigmoid(x)
+fn softplus(x) = max(x, 0) + log(1 + exp(-abs(x)))
+
+# ------------------------------------------------------------------ normalization
+
+fn softmax(x):
+    m[...] = detach(max x[..., j])                 # for numerical stability; cancels exactly
+    e[..., j] = exp(x[..., j] - m[...])
+    out[..., j] = e[..., j] / sum e[..., k]
+    return out
+
+fn log_softmax(x):
+    m[...] = detach(max x[..., j])
+    out[..., j] = x[..., j] - m[...] - log(sum exp(x[..., k] - m[...]))
+    return out
+
+fn layer_norm(x, eps = 1e-5):
+    mu[...] = mean x[..., j]
+    var[...] = mean (x[..., j] - mu[...]) ** 2
+    out[..., j] = (x[..., j] - mu[...]) / sqrt(var[...] + eps)
+    return out
+
+# ------------------------------------------------------------------ losses & metrics
+
+# label smoothing: aim for 1 - smoothing on the right class, and spread `smoothing` over all classes
+fn cross_entropy(logits: [n, k], labels: i32[n], smoothing = 0.0):
+    logp = log_softmax(logits)
+    if smoothing == 0:
+        return -mean(logp[i, labels[i]])
+    return -(1 - smoothing) * mean(logp[i, labels[i]]) - smoothing * mean(logp)
+
+fn mse(pred, target) = mean((pred - target) ** 2)
+
+fn bce(p, target, eps = 1e-7) = -mean(target * log(p + eps) + (1 - target) * log(1 - p + eps))
+
+fn bce_with_logits(z, target) = mean(max(z, 0) - z * target + log(1 + exp(-abs(z))))
+
+fn accuracy(logits: [n, k], labels: i32[n]) = mean(argmax(logits) == labels)
+
+fn onehot(labels: i32[n], k):
+    out[i, c] = f32(labels[i] == c) where c < k
+    return out
+
+# ------------------------------------------------------------------ layers
+
+model Linear(fan_in, fan_out):
+    param W: [fan_in, fan_out] ~ normal(0, sqrt(2 / fan_in))     # He initialization
+    param b: [fan_out]
+    fn forward(x) = x @ W + b
+
+# A k×k convolution over images x[n, c, h, w]: out[n, o, i, j]. `pad` zeros go around the image
+# first; `stride` is the step between windows.
+model Conv2d(c_in, c_out, k, stride = 1, pad = 0):
+    param W: [c_out, c_in, k, k] ~ normal(0, sqrt(2 / (c_in * k * k)))
+    param b: [c_out]
+    fn forward(x: [nb, c_in, h, w]):
+        if pad > 0:
+            xp = zeros(nb, c_in, h + 2 * pad, w + 2 * pad)
+            xp[n, c, i + pad, j + pad] += x[n, c, i, j]
+        else:
+            xp = x
+        # im2col: copy out the window under each output pixel, so the convolution and both of
+        # its gradients are matrix multiplies over (c, u, v)
+        patches[n, i, j, c, u, v] = xp[n, c, stride * i + u, stride * j + v] where u < k, v < k
+        out[n, o, i, j] = sum patches[n, i, j, c, u, v] * W[o, c, u, v] + b[o]
+        return out
+
+# layer_norm with a learned scale and shift for each feature
+model LayerNorm(d):
+    param g: [d] = 1
+    param b: [d]
+    fn forward(x) = layer_norm(x) * g + b
+
+# a learned vector for each of n ids
+model Embedding(n, d):
+    param E: [n, d] ~ normal(0, 1)
+    fn forward(ids) = E[ids]
+
+# the largest value in each s×s block (s = 2 halves the height and width)
+fn max_pool2d(x, s = 2):
+    out[n, c, i, j] = max x[n, c, s * i + u, s * j + v] where u < s, v < s
+    return out
+
+# ------------------------------------------------------------------ regularization
+
+# while training, zero a random fraction p of x and scale up the rest (so the expected value is x);
+# pass training=false to use the network as it is (for testing it)
+fn dropout(x, p = 0.5, training = true):
+    if not training or p == 0:
+        return x
+    keep = f32(rand(shape(x)) >= p)
+    return x * keep / (1 - p)
+
+# ------------------------------------------------------------------ learning-rate schedules
+# (the step is the loop counter: `minimize loss with adam(lr=warmup_cosine(step, STEPS, 3e-3, 100))`)
+
+# rise linearly over `warmup` steps, then fall along a cosine to `floor` at step `total`
+fn warmup_cosine(step, total, peak, warmup = 0, floor = 0.0):
+    t = f32(step)
+    progress = min(max((t - warmup) / (total - warmup), 0.0), 1.0)
+    cosine = floor + (peak - floor) * 0.5 * (1 + cos(pi * progress))
+    if warmup == 0:
+        return cosine
+    return peak * (t + 1) / warmup if t < warmup else cosine
+
+# lr, times rate for every `every` steps
+fn exponential_decay(step, lr, rate, every = 1) = lr * rate ** (f32(step) / every)
+
+# ------------------------------------------------------------------ optimizers
+# clip_norm > 0: before the update, scale all the gradients down together so that their combined
+# norm is at most clip_norm (`minimize` does this; the step functions see the clipped gradients)
+
+optimizer sgd(lr = 0.01, momentum = 0.0, weight_decay = 0.0, clip_norm = 0.0):
+    state v
+    step(w, g):
+        if momentum > 0:
+            v = momentum * v + g + weight_decay * w
+            w -= lr * v
+        else:
+            w -= lr * (g + weight_decay * w)
+
+optimizer adam(lr = 0.001, beta1 = 0.9, beta2 = 0.999, eps = 1e-8, weight_decay = 0.0, clip_norm = 0.0):
+    state m, v
+    step(w, g, t):
+        m = beta1 * m + (1 - beta1) * g
+        v = beta2 * v + (1 - beta2) * g * g
+        mhat = m / (1 - beta1 ** t)
+        vhat = v / (1 - beta2 ** t)
+        w -= lr * (mhat / (sqrt(vhat) + eps) + weight_decay * w)
+
+optimizer rmsprop(lr = 0.001, alpha = 0.99, eps = 1e-8, clip_norm = 0.0):
+    state s
+    step(w, g):
+        s = alpha * s + (1 - alpha) * g * g
+        w -= lr * g / (sqrt(s) + eps)
