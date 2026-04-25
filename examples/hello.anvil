@@ -1,0 +1,29 @@
+# hello.anvil — a tour of Anvil in 30 lines.
+
+# tensors and broadcasting
+x = [1.0, 2.0, 3.0]
+W = [[1.0, 0.0, -1.0],
+     [0.5, 0.5,  0.5]]
+print("W @ x      = {W @ x}")
+print("x * 2 + 1  = {x * 2 + 1}")
+
+# index notation: indices on the left are outputs, every other index is reduced
+y[i] = sum W[i, j] * x[j]
+print("y[i] = Σ_j W[i, j] x[j]  ->  {y}")
+
+outer[i, j] = x[i] * x[j]
+print("outer product:")
+print(outer)
+
+# reductions and the standard library (written in Anvil itself)
+print("softmax(x) = {softmax(x)}   max = {max(x)}   mean = {mean(x):.3f}")
+
+# randomness, deterministic by default
+noise: [2, 3] ~ normal(0, 1)
+print("noise = {noise}")
+
+# automatic differentiation
+param w: [3]
+loss = sum((w - x) ** 2)
+dw = grad(loss, w)
+print("d/dw Σ(w - x)² at w = 0  ->  {dw}")

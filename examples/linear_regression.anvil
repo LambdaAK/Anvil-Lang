@@ -1,0 +1,17 @@
+# linear_regression.anvil — recover a hidden linear model by gradient descent.
+
+n = 1000
+X: [n, 3] ~ normal(0, 1)
+noise: [n] ~ normal(0, 0.1)
+y = X @ [2.0, -3.4, 1.7] + 4.2 + noise
+
+param w: [3]
+param b: f32
+
+for step in range(100):
+    loss = mse(X @ w + b, y)
+    minimize loss with sgd(lr=0.1)
+    if step % 20 == 0:
+        print("step {step:3d}   loss {loss:.5f}")
+
+print("learned w = {w}   b = {b:.3f}   (truth: [2.0, -3.4, 1.7], 4.2)")
