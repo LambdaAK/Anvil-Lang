@@ -1,0 +1,21 @@
+# softmax_regression.anvil — multinomial logistic regression on MNIST.
+# (10-714 homework 0, in a dozen lines.)
+
+images = idx("data/train-images-idx3-ubyte.gz") / 255
+labels: i32[60000] = idx("data/train-labels-idx1-ubyte.gz")
+test_images = idx("data/t10k-images-idx3-ubyte.gz") / 255
+test_labels: i32[10000] = idx("data/t10k-labels-idx1-ubyte.gz")
+X = images.reshape(60000, 784)
+X_test = test_images.reshape(10000, 784)
+
+# the softmax loss, written the way it appears on paper:  mean_i [ log Σ_j exp(z_ij) - z_{i,y_i} ]
+fn softmax_loss(z: [n, k], y: i32[n]) = mean(log(sum exp(z[i, j])) - z[i, y[i]])
+
+param theta: [784, 10]
+
+for epoch in range(10):
+    for x, y in batches(X, labels, size=100):
+        loss = softmax_loss(x @ theta, y)
+        minimize loss with sgd(lr=0.2)
+    err = 1 - accuracy(X_test @ theta, test_labels)
+    print("epoch {epoch + 1:2d}   loss {loss:.4f}   test error {err:.2%}")
