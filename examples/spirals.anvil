@@ -1,0 +1,26 @@
+# spirals.anvil — two interleaved spirals: a classic nonlinear classification task.
+
+n = 1000                                   # points per class
+turns = 1.5
+t = linspace(0.3, 2 * pi * turns, n)
+noise: [2, n, 2] ~ normal(0, 0.03)
+
+# class c, point i: radius ∝ t, angle = t + c·π  (the second spiral is the first rotated by π)
+points[c, i, d] = t[i] / (2 * pi * turns) * (cos(t[i] + c * pi) if d == 0 else sin(t[i] + c * pi)) + noise[c, i, d] where c < 2, d < 2
+X = points.reshape(2 * n, 2)
+labels[k] = i32(k >= n) where k < 2000
+
+model Net:
+    l1 = Linear(2, 64)
+    l2 = Linear(64, 64)
+    l3 = Linear(64, 2)
+    fn forward(x) = x |> l1 |> tanh |> l2 |> tanh |> l3
+
+net = Net()
+
+for epoch in range(200):
+    for xb, yb in batches(X, labels, size=100, shuffle=true):
+        loss = cross_entropy(net(xb), yb)
+        minimize loss with adam(lr=0.01)
+    if epoch % 40 == 39:
+        print("epoch {epoch + 1:3d}   loss {loss:.4f}   accuracy {accuracy(net(X), labels):.1%}")
