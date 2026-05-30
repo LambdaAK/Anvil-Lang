@@ -1,0 +1,3 @@
+W: [10, 784] ~ normal(0, 1)
+x: [128] ~ normal(0, 1)
+y[i] = sum W[i, j] * x[j]

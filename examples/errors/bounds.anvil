@@ -1,0 +1,2 @@
+x: [32] ~ normal(0, 1)
+y[i] = x[i + 4] where i < 30

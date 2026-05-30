@@ -1,0 +1,4 @@
+param w: [3]
+x: [8, 3] ~ normal(0, 1)
+loss = (x @ w) ** 2
+minimize loss with sgd(lr=0.1)

@@ -1,0 +1,5 @@
+param W1: [784, 128] ~ normal(0, 0.05)
+param W2: [128, 10] ~ normal(0, 0.05)
+x: [64, 784] ~ normal(0, 1)
+h = relu(x @ W1)
+logits = h @ W1

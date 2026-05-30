@@ -1,0 +1,4 @@
+fn dense(x: [n, d], W: [d, k]) -> [n, k] = x @ W
+a: [4, 3] ~ normal(0, 1)
+b: [4, 2] ~ normal(0, 1)
+c = dense(a, b)
