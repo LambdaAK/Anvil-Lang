@@ -1,0 +1,28 @@
+# cnn.anvil — a small convolutional network on MNIST. Convolution and pooling are
+# ordinary index notation (`Conv2d` and `max_pool2d` in anvil/prelude.anvil): the output
+# sizes (24, 12, 8, 4) are inferred from the index ranges, and their gradients are
+# derived by the compiler.
+
+images = idx("data/train-images-idx3-ubyte.gz") / 255
+labels: i32[60000] = idx("data/train-labels-idx1-ubyte.gz")
+test_images = idx("data/t10k-images-idx3-ubyte.gz") / 255
+test_labels: i32[10000] = idx("data/t10k-labels-idx1-ubyte.gz")
+
+X = images.reshape(60000, 1, 28, 28)
+X_test = test_images.reshape(10000, 1, 28, 28)
+
+model LeNet:
+    c1 = Conv2d(1, 8, 5)        # 28 -> 24 -> pool 12
+    c2 = Conv2d(8, 16, 5)       # 12 ->  8 -> pool 4
+    fc = Linear(16 * 4 * 4, 10)
+    fn forward(x) = x |> c1 |> relu |> max_pool2d |> c2 |> relu |> max_pool2d |> flatten(1) |> fc
+
+net = LeNet()
+
+start = clock()
+for epoch in range(2):
+    for x, y in batches(X, labels, size=50, shuffle=true):
+        loss = cross_entropy(net(x), y)
+        minimize loss with adam(lr=2e-3)
+    acc = accuracy(net(X_test[0:2000]), test_labels[0:2000])
+    print("epoch {epoch + 1}   loss {loss:.4f}   test accuracy (2k) {acc:.2%}   ({clock() - start:.1f}s)")
