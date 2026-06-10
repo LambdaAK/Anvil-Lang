@@ -1,0 +1,31 @@
+# attention.anvil — scaled dot-product self-attention in index notation.
+# A student attention layer learns to imitate a fixed random "teacher" layer.
+
+B = 32          # sequences per batch
+T = 16          # sequence length
+d = 24          # model width
+h = 8           # head width
+
+fn attention(x: [b, t, dm], Wq: [dm, dh], Wk: [dm, dh], Wv: [dm, dh]) -> [b, t, dh]:
+    q = x @ Wq
+    k = x @ Wk
+    v = x @ Wv
+    s[..., i, j] = sum q[..., i, c] * k[..., j, c] / sqrt(dh)     # c is summed
+    p = softmax(s)                                                # over j
+    out[..., i, c] = sum p[..., i, j] * v[..., j, c]              # j is summed
+    return out
+
+Tq: [d, h] ~ normal(0, 0.4)
+Tk: [d, h] ~ normal(0, 0.4)
+Tv: [d, h] ~ normal(0, 0.4)
+
+param Wq: [d, h] ~ normal(0, 0.2)
+param Wk: [d, h] ~ normal(0, 0.2)
+param Wv: [d, h] ~ normal(0, 0.2)
+
+for step in range(1, 601):
+    x: [B, T, d] ~ normal(0, 1)
+    loss = mse(attention(x, Wq, Wk, Wv), attention(x, Tq, Tk, Tv))
+    minimize loss with adam(lr=0.01)
+    if step % 100 == 0:
+        print("step {step:3d}   loss {loss:.5f}")
