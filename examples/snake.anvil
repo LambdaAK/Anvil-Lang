@@ -1,0 +1,153 @@
+# snake.anvil — a Deep Q-Network learns to play Snake.
+#
+#     bin/anvil run examples/snake.anvil
+#
+# Everything here is Anvil: the game (as tensor operations on the board), the agent (a small
+# network that scores the three possible moves), and the training (experience replay +
+# `minimize`). After training, the last game is played without exploration and drawn in
+# the terminal.
+
+const H = 12                  # board size (inside the walls)
+const W = 12
+const EPISODES = 300          # training games
+const WATCH = 1               # 1: replay one game in the terminal afterwards
+const MEMORY = 50000          # replay buffer capacity
+const BATCH = 64
+const GAMMA = 0.9             # discount: how much future food is worth
+
+# ------------------------------------------------------------------ the game
+#
+# body[i, j] is how many more steps the snake occupies that cell (0 = free): the head holds
+# the snake's length and the tail holds 1. Moving is a single tensor operation — every cell
+# counts down by one and the cell the head enters is set to the length. Walls are a
+# one-cell border around the board.
+
+walls[i, j] = i32(i == 0 or i == H + 1 or j == 0 or j == W + 1) where i < H + 2, j < W + 2
+DY = [-1, 0, 1, 0]            # headings: up, right, down, left
+DX = [0, 1, 0, -1]
+TURN = [0, 1, 3]              # actions: go straight, turn right, turn left
+
+fn blocked(body, y, x) = walls[y, x] == 1 or body[y, x] > 1        # the tail (1) moves away
+
+fn danger(body, hy, hx, d) = f32(blocked(body, hy + DY[d], hx + DX[d]))
+
+# what the agent sees: danger straight / right / left, its heading, and where the food is
+fn features(body, hy, hx, dir, fy, fx) = [
+    danger(body, hy, hx, dir), danger(body, hy, hx, (dir + 1) % 4), danger(body, hy, hx, (dir + 3) % 4),
+    f32(dir == 0), f32(dir == 1), f32(dir == 2), f32(dir == 3),
+    f32(fy < hy), f32(fy > hy), f32(fx < hx), f32(fx > hx)]
+
+# food goes to a random free cell: the argmax of random scores over the free cells
+fn place_food(body):
+    r: [H + 2, W + 2] ~ uniform(0, 1)
+    score[i, j] = r[i, j] if body[i, j] == 0 and walls[i, j] == 0 else -1.0
+    k = argmax(score.reshape((H + 2) * (W + 2)))
+    return k // (W + 2), k % (W + 2)
+
+GLYPHS = ["  ", "\e[2m░░\e[0m", "\e[32m██\e[0m", "\e[92m▓▓\e[0m", "\e[31m● \e[0m"]
+
+# ------------------------------------------------------------------ the agent
+
+model QNet:
+    l1 = Linear(11, 128)
+    l2 = Linear(128, 3)
+    fn forward(s) = s |> l1 |> relu |> l2      # one value per action
+
+q = QNet()
+
+# replay memory: (state, action, reward, next state, game over)
+S: [MEMORY, 11] = 0
+A: i32[MEMORY] = 0
+R: [MEMORY] = 0
+S2: [MEMORY, 11] = 0
+D: [MEMORY] = 0
+ptr = 0
+count = 0
+
+recent: [50] = 0              # scores of the last 50 games
+best = 0
+start = clock()
+
+# ------------------------------------------------------------------ training
+
+for episode in range(EPISODES + WATCH):
+    watching = episode == EPISODES
+
+    # a new game: a snake of length 3 in the middle, heading right
+    hy = H // 2
+    hx = W // 2
+    dir = 1
+    length = 3
+    hunger = 0
+    steps = 0
+    body[i, j] = length - (hx - j) if i == hy and j <= hx and j > hx - length else 0 where i < H + 2, j < W + 2
+    fy, fx = place_food(body)
+    if watching:
+        print("\nwatching the trained snake (no exploration):\e[?25l")     # (and hide the cursor)
+
+    while true:
+        state = features(body, hy, hx, dir, fy, fx)
+
+        # ε-greedy: explore a lot at first, then trust the network more and more
+        eps = 0.0 if watching else max(0.02, 1.0 - episode / 120)
+        u: f32 ~ uniform(0, 1)
+        guess: i32 ~ randint(0, 3)
+        action = guess if u < eps else argmax(q(state))
+
+        # move
+        dir = (dir + TURN[action]) % 4
+        ny = hy + DY[dir]
+        nx = hx + DX[dir]
+        eat = f32(ny == fy and nx == fx)
+        hunger = hunger + 1
+        steps = steps + 1
+        dead = f32(blocked(body, ny, nx) or hunger > 100 * length)
+        reward = 10 * eat - 10 * dead
+        if dead == 0:
+            length = length + i32(eat)
+            body[i, j] = length if i == ny and j == nx else (body[i, j] if eat > 0 else max(body[i, j] - 1, 0))
+            hy = ny
+            hx = nx
+            if eat > 0:
+                hunger = 0
+                fy, fx = place_food(body)
+
+        if watching:
+            frame[i, j] = 1 if walls[i, j] == 1 else (3 if i == hy and j == hx else (2 if body[i, j] > 0 else (4 if i == fy and j == fx else 0)))
+            if steps > 1:
+                print("\e[{H + 3}A", end="")       # move the cursor back up and redraw in place
+            show(frame, GLYPHS)
+            print("  score {length - 3}  ")
+            sleep(0.05)
+        else:
+            # remember the transition ...
+            S[ptr] = state
+            A[ptr] = action
+            R[ptr] = reward
+            S2[ptr] = features(body, hy, hx, dir, fy, fx)
+            D[ptr] = dead
+            ptr = (ptr + 1) % MEMORY
+            count = min(count + 1, MEMORY)
+
+            # ... and learn from a random batch of old ones (Bellman targets from the same network)
+            if count >= BATCH:
+                idx: i32[BATCH] ~ randint(0, count)
+                a = A[idx]
+                target = R[idx] + GAMMA * (1 - D[idx]) * detach(max(q(S2[idx]), axis=1))
+                chosen[n] = q(S[idx])[n, a[n]]
+                loss = mean((chosen - target) ** 2)
+                minimize loss over q with adam(lr=1e-3)
+
+        if dead > 0:
+            break
+
+    if not watching:
+        score = length - 3
+        recent[episode % 50] = score
+        best = max(best, score)
+        if episode % 25 == 24:
+            avg = sum(recent) / min(episode + 1, 50)
+            print("game {episode + 1:3d}   ε {eps:.2f}   average score (last 50) {avg:5.2f}   best {best:2d}   ({clock() - start:.1f}s)")
+
+if WATCH == 1:
+    print("\e[?25h", end="")                    # show the cursor again
