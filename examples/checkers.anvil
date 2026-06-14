@@ -1,0 +1,291 @@
+# checkers.anvil — a neural network teaches itself checkers.
+#
+#     bin/anvil run examples/checkers.anvil
+#
+# The rules are a few lines of index notation over the 32 dark squares. The player is a small
+# network, the critic, that scores positions. It learns by playing thousands of games against
+# itself: after every move, the value of the position it was in is pulled towards the value of the
+# best move from it (temporal-difference learning, as in TD-Gammon). Then it plays by searching a
+# few moves ahead and letting the critic judge where each line ends up.
+#
+# To play against it yourself, run `bin/checkers` (that is this program with PLAY = 1).
+
+const GAMES = 4000           # self-play training games
+const MATCH = 100            # games per test match
+const MAX_PLY = 200          # a game still going after this many moves is a draw
+const MOVES = 32             # the most moves considered in one position (more is very rare)
+const EPS = 0.2              # how often a training game makes a random move
+const DEPTH = 2              # how many moves ahead it looks in test games (training looks 1 ahead)
+const WATCH = 1              # 1: then show it playing one game
+const PLAY = 0               # 1: then play against it yourself (in a terminal)
+const PLAY_DEPTH = 4         # how far it looks ahead against you
+const SAVE = "checkers.weights"    # the trained critic is kept here, next to this file
+
+# ------------------------------------------------------------------ the rules
+#
+# The dark squares are numbered 0–31, row by row from the top. A board is an i32[32] seen from the
+# side to move: its pieces are positive (1 = man, 2 = king) and its men move up the board, and the
+# opponent's pieces are negative. After every turn the board is turned around (rotated 180° and
+# negated), so the same rules, and the same network, play both sides.
+
+fn row(t) = t // 4
+fn col(t) = 2 * (t % 4) + 1 - row(t) % 2
+fn on_board(r, c) = r >= 0 and r < 8 and c >= 0 and c < 8
+fn square(r, c) = 4 * r + c // 2
+
+DY = [-1, -1, 1, 1]          # the diagonals: up-left, up-right, down-left, down-right
+DX = [-1, 1, -1, 1]
+
+# the square k steps from t along diagonal d (t itself if that is off the board)
+fn toward(t, d, k) = square(row(t) + k * DY[d], col(t) + k * DX[d]) if on_board(row(t) + k * DY[d], col(t) + k * DX[d]) else t
+NEXT[t, d] = toward(t, d, 1) where t < 32, d < 4
+JUMP[t, d] = toward(t, d, 2) where t < 32, d < 4
+
+START[t] = 1 if t >= 20 else (-1 if t < 12 else 0) where t < 32
+
+# The moves of the side to move: the piece on square src[m] steps or jumps along diagonal dir[m].
+# Captures are compulsory, and a piece that has just captured must go on capturing if it can
+# (`forced` is its square, or -1).
+fn moves(b, forced):
+    mine[s, d] = b[s] > 0 and (d < 2 or b[s] == 2) and (forced < 0 or s == forced) where d < 4    # men only go up
+    jumps[s, d] = mine[s, d] and b[NEXT[s, d]] < 0 and b[JUMP[s, d]] == 0
+    capture = sum(jumps) > 0
+    legal[s, d] = jumps[s, d] if capture else mine[s, d] and b[NEXT[s, d]] == 0
+    src, dir = nonzero(legal, size=MOVES)
+    valid[m] = m < sum(legal) where m < MOVES
+
+    # the board after each move
+    to[m] = JUMP[src[m], dir[m]] if capture else NEXT[src[m], dir[m]]
+    piece[m] = 2 if b[src[m]] == 2 or to[m] < 4 else 1                    # the far row crowns a man
+    after[m, t] = piece[m] if t == to[m] else (0 if t == src[m] or (capture and t == NEXT[src[m], dir[m]]) else b[t])
+
+    # after a capture the piece goes on if it can capture again (unless it was just crowned);
+    # otherwise it is the opponent's turn, and the board is turned around for them
+    again[m] = capture and piece[m] == b[src[m]] and max((piece[m] == 2 or e < 2) and after[m, NEXT[to[m], e]] < 0 and after[m, JUMP[to[m], e]] == 0)
+    next[m, t] = after[m, t] if again[m] else -after[m, 31 - t]
+    next_forced[m] = to[m] if again[m] else -1
+    return valid, next, next_forced, again
+
+# ------------------------------------------------------------------ the player
+
+# What the critic sees, as seven 0/1 planes over the squares: where each kind of piece is (mine or
+# theirs, man or king), the piece that has to capture again, and two attack maps: the opponent's
+# pieces the side to move can capture, and its own pieces the opponent could capture.
+fn planes(b, forced):
+    near[..., d, t] = b[..., NEXT[t, d]]              # each square's neighbors along the diagonals
+    attacked[..., t] = b[..., t] < 0 and max(near[..., 3 - d, t] > 0 and (d < 2 or near[..., 3 - d, t] == 2) and near[..., d, t] == 0)
+    threatened[..., t] = b[..., t] > 0 and max(near[..., 3 - d, t] < 0 and (d >= 2 or near[..., 3 - d, t] == -2) and near[..., d, t] == 0)
+    here[..., t] = t == forced[...] where t < 32
+    return flatten(stack([b == 1, b == 2, b == -1, b == -2, here, attacked, threatened], axis=-2), -2)
+
+model Critic:
+    l1 = Linear(7 * 32, 64)
+    l2 = Linear(64, 1)
+    fn forward(x) = tanh(x |> l1 |> relu |> l2)       # the side to move's outlook: -1 lost … 1 won
+
+critic = Critic()
+
+# how good each move is for the player making it, judged by the position it leads to (-∞: no move)
+fn evaluate(valid, next, next_forced, again):
+    v = critic(planes(next, next_forced))
+    left[m] = sum(next[m, t] > 0)                     # the next player's pieces
+    value[m] = v[m, 0] if again[m] else (1.0 if left[m] == 0 else -v[m, 0])
+    return where(valid, value, -inf)
+
+# the same, looking `depth` moves ahead: each move, the best reply to it, the best answer to that…
+# (functions are inlined, so this recursion unrolls into nested loops at compile time)
+fn search(valid, next, next_forced, again, depth):
+    if depth == 1:
+        return evaluate(valid, next, next_forced, again)
+    value: [MOVES] = -1.0
+    for k in range(i32(sum(valid))):
+        valid2, next2, forced2, again2 = moves(next[k], next_forced[k])
+        reply = max(max(search(valid2, next2, forced2, again2, depth - 1)), -1.0)    # no move: lost
+        value[k] = reply if again[k] > 0 else -reply
+    return where(valid, value, -inf)
+
+# ------------------------------------------------------------------ two fixed opponents
+
+fn random_player(valid):
+    u: [MOVES] ~ uniform(0, 1)
+    return where(valid, u, -inf)
+
+# takes the most material it can (a king counts double), minus what the reply could take back;
+# random among equals
+fn greedy_player(valid, next, again):
+    u: [MOVES] ~ uniform(0, 1)
+    material[m] = sum(next[m, t]) * (1 if again[m] else -1)
+    threat[m] = 0 if again[m] else max((next[m, s] > 0 and (e < 2 or next[m, s] == 2) and next[m, JUMP[s, e]] == 0) * -min(next[m, NEXT[s, e]], 0))
+    return where(valid, material - threat + 0.1 * u, -inf)
+
+# a match against one of them (0: random, 1: greedy), taking turns to go first: (won, drawn)
+fn match(opponent):
+    won = 0
+    drawn = 0
+    for g in range(MATCH):
+        b = START
+        forced = -1
+        ply = 0
+        side = g % 2                            # 0: the critic is to move
+        while true:
+            valid, next, next_forced, again = moves(b, forced)
+            if sum(valid) == 0:                 # no move left: the side to move has lost
+                if side == 1:
+                    won = won + 1
+                break
+            if ply == MAX_PLY:
+                drawn = drawn + 1
+                break
+            if side == 0:
+                score = search(valid, next, next_forced, again, DEPTH)
+            elif opponent == 0:
+                score = random_player(valid)
+            else:
+                score = greedy_player(valid, next, again)
+            m = argmax(score)
+            b = next[m]
+            forced = next_forced[m]
+            side = side if again[m] > 0 else 1 - side
+            ply = ply + 1
+    return won, drawn
+
+# ------------------------------------------------------------------ learning by self-play
+
+fn learn():
+    start = clock()
+    report = 250
+    for game in range(GAMES):
+        b = START
+        forced = -1
+        ply = 0
+        while true:
+            valid, next, next_forced, again = moves(b, forced)
+            score = evaluate(valid, next, next_forced, again)
+
+            # TD learning: a position is worth as much as the best move from it (a little less, so
+            # that winning sooner is better)
+            if sum(valid) == 0:
+                target = -1.0                       # no move left: lost
+            elif ply == MAX_PLY:
+                target = 0.0                        # a draw
+            else:
+                target = 0.99 * max(score)
+            loss = (critic(planes(b, forced))[0] - detach(target)) ** 2
+            minimize loss over critic with adam(lr=3e-4)
+            if sum(valid) == 0 or ply == MAX_PLY:
+                break
+
+            # play the best move, or now and then a random one
+            u: f32 ~ uniform(0, 1)
+            m = argmax(random_player(valid) if u < EPS else score)
+            b = next[m]
+            forced = next_forced[m]
+            ply = ply + 1
+
+        if game + 1 == report or game + 1 == GAMES:
+            won_r, drawn_r = match(0)
+            won_g, drawn_g = match(1)
+            print("{game + 1:5d} games   vs random: {won_r:3d} won {drawn_r:3d} drawn {MATCH - won_r - drawn_r:3d} lost   vs greedy: {won_g:3d} won {drawn_g:3d} drawn {MATCH - won_g - drawn_g:3d} lost   ({clock() - start:.1f}s)")
+            report = 2 * report
+
+# To play you, it uses the critic saved by an earlier run if there is one. Otherwise it learns now,
+# and saves the critic for next time.
+loaded = 0.0
+if PLAY == 1:
+    loaded = load(critic, SAVE)
+if loaded > 0:
+    print("(the critic from an earlier run, saved in {SAVE} next to this program: delete that file to train a new one)")
+else:
+    learn()
+    save(critic, SAVE)
+
+# ------------------------------------------------------------------ games on screen
+
+# a light square, then a dark square holding -2 … 2: a white king or man, nothing, a red man or king
+GLYPHS = ["  ", "\e[1;37m◎ \e[0m", "\e[1;37m○ \e[0m", "\e[2m· \e[0m", "\e[1;31m● \e[0m", "\e[1;31m◉ \e[0m"]
+
+fn draw(b):                                     # b: the board with red's men moving up
+    cell[r, h, p] = b[4 * r + h] + 3 if (r + p) % 2 == 1 else 0 where r < 8, h < 4, p < 2     # column 2h + p
+    board = cell.reshape(8, 8)
+    for r in range(8):
+        print("  {8 - r} ", end="")
+        show(board[r], GLYPHS)
+    print("    a b c d e f g h")
+
+if WATCH == 1:
+    print("\nthe critic (red, moving up) against the greedy player (white):\e[?25l")
+    b = START
+    forced = -1
+    ply = 0
+    side = 0
+    while true:
+        valid, next, next_forced, again = moves(b, forced)
+        view[t] = b[t] if side == 0 else -b[31 - t]
+        if ply > 0:
+            print("\e[10A", end="")             # back up and draw over the last frame
+        draw(view)
+        print("  move {ply:3d}   red {sum(view > 0):2.0f}   white {sum(view < 0):2.0f}")
+        if sum(valid) == 0 or ply == MAX_PLY:
+            break
+        score = search(valid, next, next_forced, again, DEPTH) if side == 0 else greedy_player(valid, next, again)
+        m = argmax(score)
+        b = next[m]
+        forced = next_forced[m]
+        side = side if again[m] > 0 else 1 - side
+        ply = ply + 1
+        sleep(0.15)
+    if sum(valid) > 0:
+        print("a draw\e[?25h")
+    elif side == 1:
+        print("the critic wins\e[?25h")
+    else:
+        print("the greedy player wins\e[?25h")
+
+# your game: moves are listed by number, like `3: c3-d4` (or `c3xe5` for a capture)
+FILES = ["a", "b", "c", "d", "e", "f", "g", "h"]
+SEP = ["-", "x"]
+fn move_name(f, t) = "{FILES[col(f)]}{8 - row(f)}{SEP[abs(row(t) - row(f)) // 2]}{FILES[col(t)]}{8 - row(t)}"
+
+# the squares move m goes from and to, on the mover's board b
+fn squares(b, next, again, m):
+    after[t] = next[m, t] if again[m] > 0 else -next[m, 31 - t]
+    return argmax(b > 0 and after == 0), argmax(b == 0 and after > 0)
+
+if PLAY == 1:
+    print("\nyour game: you are red (●), moving up, and you go first; the critic is white (○)")
+    print("type the number of a move; ctrl-D ends the game")
+    b = START
+    forced = -1
+    ply = 0
+    side = 1                                    # 1: you, 0: the critic
+    while true:
+        valid, next, next_forced, again = moves(b, forced)
+        over = sum(valid) == 0 or ply == MAX_PLY
+        if side == 1 or over:
+            view[t] = b[t] if side == 1 else -b[31 - t]
+            print("")
+            draw(view)
+        if over:
+            break
+        if side == 1:
+            for k in range(i32(sum(valid))):
+                f, t = squares(b, next, again, k)
+                print("  {k + 1}: {move_name(f, t)}", end="")
+            choice = input("\nyour move: ")
+            while not (choice >= 1 and choice <= sum(valid)):
+                choice = input("a number from 1 to {sum(valid):.0f}, please: ")
+            m = i32(choice) - 1
+        else:
+            m = argmax(search(valid, next, next_forced, again, PLAY_DEPTH))
+            f, t = squares(b, next, again, m)
+            print("the critic plays {move_name(31 - f, 31 - t)}")
+        b = next[m]
+        forced = next_forced[m]
+        side = side if again[m] > 0 else 1 - side
+        ply = ply + 1
+    if sum(valid) > 0:
+        print("a draw")
+    elif side == 0:
+        print("you win!")
+    else:
+        print("the critic wins")
