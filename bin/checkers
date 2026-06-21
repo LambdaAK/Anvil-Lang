@@ -1,0 +1,7 @@
+#!/bin/sh
+# Play checkers against the network from examples/checkers.anvil. You are red and move first.
+# The first time, it learns for about 15 seconds and saves what it learned next to the program;
+# after that the game starts right away. Options go to `anvil run`, for example
+#     bin/checkers --set PLAY_DEPTH=5     a stronger opponent: it looks 5 moves ahead
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+exec "$DIR/bin/anvil" run "$DIR/examples/checkers.anvil" --set PLAY=1 --set WATCH=0 "$@"
