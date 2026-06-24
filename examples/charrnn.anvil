@@ -1,0 +1,66 @@
+# charrnn.anvil — a recurrent network learns to write like this project's README.
+#
+#     bin/anvil run examples/charrnn.anvil
+#
+# A GRU reads the README one byte at a time and learns to predict the next byte. Training unrolls
+# it over SEQ steps with `static for`, so the gradient flows back through time; then it writes
+# text of its own, one sampled byte at a time.
+
+const STEPS = 3000           # training steps
+const BATCH = 32             # windows of text per step
+const SEQ = 32               # bytes per window (the unrolled length)
+const EMBED = 32
+const HIDDEN = 128
+const SAMPLE = 600           # bytes to write at the end
+const HEAT = 0.7             # sampling temperature: lower is safer, higher is wilder
+
+text = bytes("../README.md")                  # i32[n]: one byte value (0–255) per element
+n = len(text)
+
+model GRU(n_in, n_hid):
+    xz = Linear(n_in, n_hid)
+    hz = Linear(n_hid, n_hid)
+    xr = Linear(n_in, n_hid)
+    hr = Linear(n_hid, n_hid)
+    xc = Linear(n_in, n_hid)
+    hc = Linear(n_hid, n_hid)
+    fn forward(x, h):
+        z = sigmoid(xz(x) + hz(h))            # how much of the state to replace
+        r = sigmoid(xr(x) + hr(h))            # how much of the old state the candidate sees
+        c = tanh(xc(x) + hc(r * h))           # the candidate state
+        return (1 - z) * h + z * c
+
+model CharRNN:
+    param E: [256, EMBED] ~ normal(0, 1)      # a vector for each byte value
+    gru = GRU(EMBED, HIDDEN)
+    out = Linear(HIDDEN, 256)                 # scores for the next byte
+
+net = CharRNN()
+
+start = clock()
+for step in range(STEPS):
+    # BATCH windows of SEQ + 1 bytes at random places in the text
+    at: i32[BATCH] ~ randint(0, n - SEQ - 1)
+    x[b, t] = text[at[b] + t] where t < SEQ + 1
+    h = zeros(BATCH, HIDDEN)
+    loss = 0.0
+    static for t in range(SEQ):               # unrolled: backpropagation through time
+        h = net.gru(net.E[x[:, t]], h)
+        loss = loss + cross_entropy(net.out(h), x[:, t + 1])
+    minimize loss / SEQ over net with adam(lr=3e-3)
+    if step % 500 == 499:
+        print("step {step + 1:5d}   {loss / SEQ / log(2.0):.2f} bits per byte   ({clock() - start:.1f}s)")
+
+# write: feed each sampled byte back in. Adding Gumbel noise to the scores and taking the largest
+# draws a byte with probability softmax(scores / HEAT)
+sample: i32[SAMPLE] = 0
+h = zeros(HIDDEN)
+c = 10                                        # start after a newline
+for k in range(SAMPLE):
+    h = net.gru(net.E[c], h)
+    u: [256] ~ uniform(0, 1)
+    c = argmax(net.out(h) / HEAT - log(-log(u)))
+    sample[k] = c
+print("\n" + "-" * 72)
+print(decode(sample))
+print("-" * 72)
