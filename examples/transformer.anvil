@@ -1,0 +1,72 @@
+# transformer.anvil — a small GPT-style transformer learns to write like this project's README.
+#
+#     bin/anvil run examples/transformer.anvil
+#
+# Multi-head causal self-attention, layer norm, an MLP and residual connections, each a few lines
+# of index notation. It reads windows of the README and learns to predict every next byte at once;
+# then it writes, feeding its own output back in.
+
+const STEPS = 3000
+const BATCH = 16             # windows per step
+const T = 64                 # bytes of context
+const D = 64                 # model width
+const HEADS = 4
+const DH = D // HEADS        # width of each head
+const SAMPLE = 500
+const HEAT = 0.7             # sampling temperature
+
+text = bytes("../README.md")
+n = len(text)
+
+model Block:
+    param Wq: [D, D] ~ normal(0, sqrt(1 / D))
+    param Wk: [D, D] ~ normal(0, sqrt(1 / D))
+    param Wv: [D, D] ~ normal(0, sqrt(1 / D))
+    param Wo: [D, D] ~ normal(0, sqrt(0.5 / D))
+    up = Linear(D, 4 * D)
+    down = Linear(4 * D, D)
+    fn forward(x):
+        # causal self-attention: HEADS heads of width DH, each over the positions up to its own
+        h = layer_norm(x)
+        q = (h @ Wq).reshape(-1, T, HEADS, DH)
+        k = (h @ Wk).reshape(-1, T, HEADS, DH)
+        v = (h @ Wv).reshape(-1, T, HEADS, DH)
+        s[b, a, i, j] = sum q[b, i, a, e] * k[b, j, a, e] / sqrt(DH) + (0.0 if j <= i else -1e9)
+        p = softmax(s)
+        o[b, i, a, e] = sum p[b, a, i, j] * v[b, j, a, e]
+        x = x + o.reshape(-1, T, D) @ Wo
+        # a position-wise MLP
+        return x + (layer_norm(x) |> up |> gelu |> down)
+
+model GPT:
+    param E: [256, D] ~ normal(0, 0.5)        # a vector for each byte value
+    param P: [T, D] ~ normal(0, 0.1)          # and for each position
+    b1 = Block()
+    b2 = Block()
+    out = Linear(D, 256)
+    fn forward(codes):                         # codes: i32[batch, T] -> scores [batch, T, 256]
+        e[b, t, d] = E[codes[b, t], d] + P[t, d]
+        return e |> b1 |> b2 |> layer_norm |> out
+
+net = GPT()
+
+start = clock()
+for step in range(STEPS):
+    at: i32[BATCH] ~ randint(0, n - T - 1)
+    x[b, t] = text[at[b] + t] where t < T + 1
+    logits = net(x[:, 0:T])
+    loss = cross_entropy(logits.reshape(BATCH * T, 256), x[:, 1:T + 1].reshape(BATCH * T))
+    minimize loss over net with adam(lr=2e-3)
+    if step % 250 == 249:
+        print("step {step + 1:5d}   {loss / log(2.0):.2f} bits per byte   ({clock() - start:.1f}s)")
+
+# write: start from the README's first T bytes, then feed each sampled byte back in
+seq: i32[T + SAMPLE] = 0
+seq[0:T] = text[0:T]
+for k in range(SAMPLE):
+    scores = net(seq[k:k + T].reshape(1, T))[0, T - 1]       # the prediction after the last byte
+    u: [256] ~ uniform(0, 1)
+    seq[T + k] = argmax(scores / HEAT - log(-log(u)))
+print("\n" + "-" * 72)
+print(decode(seq))
+print("-" * 72)
