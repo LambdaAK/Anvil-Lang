@@ -1,0 +1,47 @@
+# vae.anvil — a variational autoencoder learns MNIST digits, then dreams up new ones.
+#
+#     bin/anvil run examples/vae.anvil
+#
+# The encoder maps an image to a distribution over a 16-number code; the decoder maps a code back
+# to an image. Sampling the code with `~ normal(mu, sigma)` is differentiable (the
+# reparameterization trick), so `minimize` trains both halves at once. Afterwards, codes drawn
+# from a plain normal distribution decode into digits that were never in the data.
+
+const EPOCHS = 5
+const Z = 16                 # size of the code
+const ROWS = 2               # digits to draw at the end: ROWS × COLS
+const COLS = 4
+
+images = idx("data/train-images-idx3-ubyte.gz") / 255
+X = images.reshape(60000, 784)
+
+model VAE:
+    enc = Linear(784, 256)
+    mu = Linear(256, Z)
+    logvar = Linear(256, Z)
+    dec1 = Linear(Z, 256)
+    dec2 = Linear(256, 784)
+    fn decode(z) = z |> dec1 |> relu |> dec2 |> sigmoid
+
+vae = VAE()
+
+start = clock()
+for epoch in range(EPOCHS):
+    for x in batches(X, size=100, shuffle=true):
+        h = relu(vae.enc(x))
+        mu = vae.mu(h)
+        logvar = vae.logvar(h)
+        z: [100, Z] ~ normal(mu, exp(0.5 * logvar))         # a code near mu: the reparameterization trick
+        recon = bce(vae.decode(z), x) * 784                     # how well the image comes back (per image)
+        kl = -0.5 * mean(sum(1 + logvar - mu * mu - exp(logvar), axis=1))   # how far the codes stray from normal(0, 1)
+        loss = recon + kl
+        minimize loss over vae with adam(lr=1e-3)
+    print("epoch {epoch + 1}   reconstruction {recon:6.1f}   KL {kl:5.1f}   ({clock() - start:.1f}s)")
+
+# imagine: decode random codes, and draw them two rows of pixels to a character
+z: [ROWS * COLS, Z] ~ normal(0, 1)
+dream = vae.decode(z).reshape(ROWS, COLS, 28, 28)
+canvas: [ROWS * 15, COLS * 30] = 0
+canvas[a * 15 + r, d * 30 + c] += (dream[a, d, 2 * r, c] + dream[a, d, 2 * r + 1, c]) / 2
+print("\ndigits it imagined:\n")
+show(i32(9.99 * canvas), " .:-=+*#%@")
