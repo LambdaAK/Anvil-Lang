@@ -343,6 +343,278 @@ Lk86_loop3:
 
 There is more detail in [docs/PLAN.md](docs/PLAN.md), the design document.
 
+## Examples
+
+| | | |
+|---|---|---|
+| [`hello.anvil`](examples/hello.anvil) | tensors, index notation, printing, `grad` | instant |
+| [`linear_regression.anvil`](examples/linear_regression.anvil) | `param`, `mse`, `sgd`; recovers the hidden weights | 0.2 s |
+| [`spirals.anvil`](examples/spirals.anvil) | data built with index notation; a tanh MLP with Adam | 99.5% in < 1 s |
+| [`softmax_regression.anvil`](examples/softmax_regression.anvil) | the loss as one index-notation formula (10-714 hw0) | 7.97% test error, 1 s |
+| [`mnist.anvil`](examples/mnist.anvil) | MLP, shuffled batches, models | 96.9%, 0.1 s/epoch |
+| [`cnn.anvil`](examples/cnn.anvil) | convolution and pooling (`Conv2d`, `max_pool2d` from the prelude) | 97.9% (2 epochs), 0.9 s/epoch |
+| [`attention.anvil`](examples/attention.anvil) | batched self-attention with `...` | loss → 0 in 600 steps, 0.5 s |
+| [`snake.anvil`](examples/snake.anvil) | a Deep Q-Network that learns Snake, then plays it in the terminal | average score 17 after 300 games (1.9 s) |
+| [`vae.anvil`](examples/vae.anvil) | a variational autoencoder (reparameterized `~ normal(mu, sigma)`, KL term); draws the digits it imagines as text | 5 epochs in 2.7 s |
+| [`charrnn.anvil`](examples/charrnn.anvil) | a GRU language model trained on this README with backpropagation through time (`static for`), then sampled | 1.06 bits per byte after 3,000 steps (11 s) |
+| [`transformer.anvil`](examples/transformer.anvil) | a small GPT: multi-head causal attention, layer norm, MLP, residuals, all index notation | 1.04 bits per byte on the README after 3,000 steps (10 s) |
+| [`digits.anvil`](examples/digits.anvil) | a CNN for hand-drawn digits, trained with random shifts and saved for `bin/draw` | 99.0% after 6 epochs |
+| [`letters.anvil`](examples/letters.anvil) | a CNN for handwritten letters and digits (EMNIST's 62 classes, 698,000 images), saved for `bin/draw --text` | 86.9% after 3 epochs (2 min) |
+| [`diffusion.anvil`](examples/diffusion.anvil) | a denoising diffusion model (DDPM) with classifier-free guidance; draws each digit 0–9 on request | 20 epochs in 44 s |
+| [`checkers.anvil`](examples/checkers.anvil) | checkers learned by self-play (TD learning) plus look-ahead search; play it with `bin/checkers` | beats a greedy player 94–6–0 after 4,000 games (14 s) |
+
+### Reinforcement learning: Snake
+
+[`examples/snake.anvil`](examples/snake.anvil) is a complete DQN in about 100 lines of code: the game, the
+agent, experience replay, and an animated replay of the trained snake. The board is a tensor of
+"lifetimes": each body cell stores how many more steps it stays occupied. Moving the snake is
+therefore one index-notation statement:
+
+```python
+body[i, j] = length if i == ny and j == nx else (body[i, j] if eat > 0 else max(body[i, j] - 1, 0))
+```
+
+The learning step is the Bellman update, written as it is on paper:
+
+```python
+idx: i32[BATCH] ~ randint(0, count)
+a = A[idx]
+target = R[idx] + GAMMA * (1 - D[idx]) * detach(max(q(S2[idx]), axis=1))
+chosen[n] = q(S[idx])[n, a[n]]
+loss = mean((chosen - target) ** 2)
+minimize loss over q with adam(lr=1e-3)
+```
+
+It reaches an average score of about 17 on a 12×12 board after 300 games, which take under 2
+seconds. The agent sees only the 11 classic features (danger straight, left and right, its
+heading, and the food's direction), so it eventually traps itself; a wider view of the board is
+the natural next step.
+
+### A recurrent network: charrnn
+
+[`examples/charrnn.anvil`](examples/charrnn.anvil) trains a GRU, written out in about 15 lines of Anvil,
+to predict the next byte of this README. The loop over time is a `static for`, so the compiler
+unrolls the 32 steps and the backward pass runs through all of them:
+
+```python
+at: i32[BATCH] ~ randint(0, n - SEQ - 1)
+x[b, t] = text[at[b] + t] where t < SEQ + 1           # 32 random windows of the text
+h = zeros(BATCH, HIDDEN)
+loss = 0.0
+static for t in range(SEQ):
+    h = net.gru(net.E[x[:, t]], h)
+    loss = loss + cross_entropy(net.out(h), x[:, t + 1])
+minimize loss / SEQ over net with adam(lr=3e-3)
+```
+
+The unrolled program has 1,252 kernels and compiles in about 3 seconds. Training reaches about 1
+bit per byte in 11 seconds. (It was 0.8 when this README was 25 KB; at 38 KB it is harder to
+memorize.) Then it writes, feeding each sampled byte back in. It mostly memorizes the text, so
+what it writes is a remix of this README:
+
+```
+model Linear(fan_in, fnel; let dt shape is known at compile time: about 90 GFLOP/s, roughly
+fused and vectorized like everything else.
+
+## Testing
+
+  needs 47 KB of scratch space instead one sees. A nater and each that core's
+  NEON FMA peak.
+```
+
+### A transformer
+
+[`examples/transformer.anvil`](examples/transformer.anvil) is a two-block GPT on the same text. Its
+attention is three lines of index notation, with the causal mask added to the scores:
+
+```python
+s[b, a, i, j] = sum q[b, i, a, e] * k[b, j, a, e] / sqrt(DH) + (0.0 if j <= i else -1e9)
+p = softmax(s)
+o[b, i, a, e] = sum p[b, a, i, j] * v[b, j, a, e]
+```
+
+It trains in about 10 seconds. For the first 600 steps the loss sits at about 3.2 bits per byte,
+which is roughly what predicting each byte from the one before it gives. Then attention starts to
+pay off and the loss falls to about 1 bit per byte on the current 38 KB README (0.6 on the 25 KB
+version).
+
+### Draw a digit
+
+```bash
+bin/draw
+```
+
+`bin/draw` opens a page in your browser where you draw a digit with the mouse or a finger. A
+convolutional network written in Anvil reads it as you draw: you see the digit it reads, how sure
+it is of each of 0–9, and the 28×28 image it was given.
+- **Training.** The first time, `bin/draw` trains the network
+  ([`examples/digits.anvil`](examples/digits.anvil), about a minute) and saves it to
+  `examples/digits.weights`. Every training digit is moved by up to 2 pixels in a random direction,
+  because hand-drawn digits are never placed as exactly as MNIST's. The network reaches 99.0% on
+  MNIST's test digits.
+- **Your drawing.** The page sends your strokes, not pixels. The server
+  ([`examples/draw/server.py`](examples/draw/server.py)) redraws them the way MNIST's digits look:
+  scaled to fit a 20×20 box, with MNIST's stroke width, and centered by their center of mass.
+  A digit drawn small in a corner reads the same as one drawn large in the middle.
+- **Reading it.** The network runs as native code compiled by Anvil (`anvil.function`), with the
+  weights the Anvil program saved. Each reading takes about 2 ms.
+
+The tests draw every digit as a person might with a mouse, in 20 wobbly, slanted, stretched,
+small and large versions each, and require the network to read at least 90% of them. The fully
+trained network reads all of them.
+
+### Write in English
+
+```bash
+bin/draw --text
+```
+
+The Text page reads handwritten English: write a few words or lines, printing the letters, and it
+shows the text it reads, a box around each letter it found, and each letter as the network saw it.
+- **The network.** [`examples/letters.anvil`](examples/letters.anvil) trains a CNN
+  ([`letters_model.anvil`](examples/letters_model.anvil)) on EMNIST: 698,000 handwritten characters
+  in 62 classes (0–9, A–Z, a–z), each turned the right way round and moved by up to 2 pixels
+  in the training loop. Three epochs take two minutes and reach 86.9% on EMNIST's test set. That is
+  about the best one character alone allows: o, O and 0, or l, I and 1, are often drawn exactly
+  alike. (The data, 2.2 GB as floats, is too big for the program's static data section, so tensors
+  of 64 MB or more are allocated when the program starts.)
+- **Letters, words, lines** ([`examples/draw/text_reader.py`](examples/draw/text_reader.py)). Lines
+  come from the tall strokes. Strokes that overlap from left to right make one letter: the dot of
+  an i, the bar of a t, the three strokes of an E. Strokes that only touch might be one letter (the
+  arches of an m) or two written close together, and the reader tries both. A gap that stands out
+  from the gaps between letters separates words. Periods, commas and apostrophes are told apart
+  by size and position.
+- **Context.** For each word, a beam search tries the ways of dividing it into letters. Each
+  division is read three ways: as the dictionary word the network's probabilities fit best
+  (`/usr/share/dict/words`, plus suffixes like -s, -ed and -ing, and a bonus for common words), as
+  the letters read one by one (for names), and as a number. The most probable reading wins. Alone,
+  the network reads `hello world` as `he110 W0r1d`.
+- **Case.** EMNIST scales every character to fill its frame, so the network can't tell c from C.
+  The reader also uses each letter's height on its line: a letter that rises only as high as the
+  small letters is lowercase. The letters of a word vote for CAPITALS, Capitalized or lowercase.
+
+The tests write sentences with the same strokes a mouse would make. In 60 random sentences
+(246 words), it reads 100% of words in neat writing, 98.8% in wobbly writing, 98.8% with letters
+crowded together, and 88% when both happen at once. A sentence takes 15–30 ms.
+
+### Diffusion
+
+[`examples/diffusion.anvil`](examples/diffusion.anvil) is a denoising diffusion model:
+- **Training.** A digit is drowned in a random amount of noise, and a network learns to recover
+  it. The network is told the noise level and the digit.
+- **Drawing.** It starts from pure noise and steps down through 200 noise levels.
+- **Guidance.** The label is hidden 10% of the time during training. When drawing, each step
+  then leans away from "any digit" towards the digit asked for (classifier-free guidance).
+
+The noise schedule is two lines of index notation, computed when the program starts:
+
+```python
+beta[t] = (1e-4 + (0.02 - 1e-4) * t / (T - 1)) * 1000 / T where t < T
+alpha_bar[t] = prod (alpha[s] if s <= t else 1.0) where t < T
+```
+
+Training takes 44 seconds on the CPU. Then it draws each digit, two pixels by two to a
+character:
+
+```
+      ▟██▖               ▟▌           ▟██▖          ▄▄▄▄                   ▄
+     ▐████▄             ▗█▘           ▀▀▀█         ▝█▀▀█▙                 ▐█
+    ▗██▀▝▜█▖            █▛               █             ▐█            ▗▄   ▟▛
+    ▟█▘   ██           ▐█▘              ▗█            ▟██▖           ▟▛  ▟█
+   ▟█▘    ██          ▗█▌               ▟█           ▐███▙▖        ▗▟█▌  █▌
+  ▗█▛     ██          ▟▛           ▗▄▄▄▄█▛               ▜█       ▟███▌ ▐█▌
+  ▐█▘    ▟█▘         ▐█▘          ▗██▀███▘                █       █▛▘   ██
+  ▐█   ▗██▘         ▗█▌           ▐█▌▄█▛▀                ▟▌       ▝     █▌
+  ▝██▄▟██▘          ▟█            ▝██▛▀   ▗█▘      ▙▖  ▄▟█             ▐█
+   ▝▜██▀            █▌                     ▀      ▝█████▛▘             ▐█
+
+                       ▗█▌
+                       ▟█▘                             ▗▄▄▄
+        ▗▄▟██         ▟█▘         ▄▄▄▄▄               ▟█▀▀█▙          ▟█▌
+      ▟██▛▀▜▘        ▗█▘          ▐█▜████▖           ▗█▘  ▐█▌        ▟▛▘█▖
+     ▟█▀            ▗█▛                ▝█▌           ▐█  ▗██        ▐█▘ █▌
+    ▟█▌             ██ ▗▄▄▄▖            █▌           ▐█▄██▀▘        ▐▌ ▗█▌
+    ███▖           ▐█▘▗████▌            █            ▐██▀           ▐▙▟██▘
+        ▙▖         ▐█▄█▛ ▟█▌           ▐█           ▗██▌            ▝▀▀ █
+  ▐▙   ▐█▌         ▝██████▘            ▟▛          ▗█▛ █               ▐█
+  ▐█████▀           ▀███▀▘             █           ▐█ ▗█               ▐▌
+   ▀▀▀▀▘                              ▐█           ▐███▘               ▜▌
+```
+
+The network predicts the clean image rather than the noise. Predicting 784 numbers of white noise
+through a 512-wide hidden layer cannot work, and the first version, which tried, stalled at a loss
+no better than guessing.
+
+### Self-play: checkers
+
+[`examples/checkers.anvil`](examples/checkers.anvil) learns checkers from the rules alone. A small
+network, the critic, scores positions. It plays thousands of games against itself, and after every
+move the value of the position it was in is pulled towards the value of the best move from it.
+That is temporal-difference learning, as in TD-Gammon. Arthur Samuel's 1959 checkers player, the
+program that gave machine learning its name, learned in a similar way.
+
+The rules are index notation over the 32 dark squares. The board is always seen from the side to
+move, so one set of rules and one network play both colors. `NEXT[s, d]` and `JUMP[s, d]` are the
+squares one and two steps along each diagonal:
+
+```python
+mine[s, d] = b[s] > 0 and (d < 2 or b[s] == 2) and (forced < 0 or s == forced) where d < 4    # men only go up
+jumps[s, d] = mine[s, d] and b[NEXT[s, d]] < 0 and b[JUMP[s, d]] == 0
+capture = sum(jumps) > 0                                       # captures are compulsory
+legal[s, d] = jumps[s, d] if capture else mine[s, d] and b[NEXT[s, d]] == 0
+src, dir = nonzero(legal, size=MOVES)                          # the legal moves, as a list
+```
+
+Every legal move's resulting board is built at once and turned around for the opponent
+(`next[m, t] = -after[m, 31 - t]`), and the critic scores them all in one batch. Training looks one
+move ahead. Playing looks further, with a search written as recursion that the compiler unrolls,
+because `depth` is a constant:
+
+```python
+fn search(valid, next, next_forced, again, depth):
+    if depth == 1:
+        return evaluate(valid, next, next_forced, again)
+    value: [MOVES] = -1.0
+    for k in range(i32(sum(valid))):
+        valid2, next2, forced2, again2 = moves(next[k], next_forced[k])
+        reply = max(max(search(valid2, next2, forced2, again2, depth - 1)), -1.0)
+        value[k] = reply if again[k] > 0 else -reply
+    return where(valid, value, -inf)
+```
+
+Every few hundred games it plays 100 games against a random player and 100 against a greedy one.
+The greedy player takes the most material it can and avoids moves that let the reply take some back:
+
+```
+$ bin/anvil run examples/checkers.anvil
+  250 games   vs random:  98 won   1 drawn   1 lost   vs greedy:  32 won  50 drawn  18 lost   (1.5s)
+  500 games   vs random:  99 won   1 drawn   0 lost   vs greedy:  32 won  47 drawn  21 lost   (2.9s)
+ 1000 games   vs random: 100 won   0 drawn   0 lost   vs greedy:  78 won  21 drawn   1 lost   (4.9s)
+ 2000 games   vs random: 100 won   0 drawn   0 lost   vs greedy:  88 won  12 drawn   0 lost   (8.1s)
+ 4000 games   vs random: 100 won   0 drawn   0 lost   vs greedy:  94 won   6 drawn   0 lost   (13.7s)
+```
+
+Then it plays one game against the greedy player on screen. Looking ahead matters: against the
+greedy player, the fully trained critic wins 58, draws 39 and loses 3 of 100 games when it looks one
+move ahead. It wins 87–13–0 at two moves, 94–6–0 at three and 96–4–0 at four. Besides the pieces,
+the critic sees two attack maps: which pieces can be captured right now, for each side. In an
+earlier version without them, the critic looked one move ahead, beat the random player, and lost
+most of its games to the greedy one.
+
+**Play it yourself** in a terminal:
+
+```bash
+bin/checkers
+```
+
+You are red and move first, choosing moves by number from a list like
+`1: a3-b4  2: c3-b4  3: c3-d4`. The critic answers looking four moves ahead.
+`bin/checkers --set PLAY_DEPTH=5` makes it stronger. The first time, it learns for about 15
+seconds and saves the critic to `examples/checkers.weights`. After that, the game starts right
+away. To train a fresh critic, delete that file or run the example again, which always trains
+and saves. `bin/checkers` is just the example with `--set PLAY=1 --set WATCH=0`. `--set` gives
+any `const` in a program a new value without editing the file.
+
 ## Testing
 
 ```bash
