@@ -1,0 +1,406 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Anvil",
+  "scopeName": "source.anvil",
+  "patterns": [
+    {
+      "include": "#comment"
+    },
+    {
+      "include": "#index-definition"
+    },
+    {
+      "include": "#declaration"
+    },
+    {
+      "include": "#annotation"
+    },
+    {
+      "include": "#string"
+    },
+    {
+      "include": "#where"
+    },
+    {
+      "include": "#keyword"
+    },
+    {
+      "include": "#type"
+    },
+    {
+      "include": "#distribution"
+    },
+    {
+      "include": "#builtin"
+    },
+    {
+      "include": "#number"
+    },
+    {
+      "include": "#operator"
+    },
+    {
+      "include": "#call"
+    }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.number-sign.anvil",
+      "match": "#.*$"
+    },
+    "index-definition": {
+      "comment": "y[i, j] = …, counts[labels[i]] += 1: the tensor being defined and its index names",
+      "begin": "^\\s*([A-Za-z_\\p{L}][A-Za-z0-9_\\p{L}]*)(\\[)(?=(?:[^\\[\\]]|\\[[^\\[\\]]*\\])*\\]\\s*(?:=(?!=)|\\+=|-=))",
+      "beginCaptures": {
+        "1": {
+          "name": "variable.other.definition.tensor.anvil"
+        },
+        "2": {
+          "name": "punctuation.section.brackets.begin.anvil"
+        }
+      },
+      "end": "\\]",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.brackets.end.anvil"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#index-contents"
+        }
+      ]
+    },
+    "where": {
+      "comment": "… where u < 2, v < k: index ranges",
+      "match": "\\b(where)\\b((?:\\s*[A-Za-z_][A-Za-z0-9_]*\\s*<\\s*[^,#\\n]+,?)+)",
+      "captures": {
+        "1": {
+          "name": "keyword.other.where.anvil"
+        },
+        "2": {
+          "patterns": [
+            {
+              "match": "([A-Za-z_][A-Za-z0-9_]*)(?=\\s*<)",
+              "captures": {
+                "1": {
+                  "name": "variable.parameter.index.anvil"
+                }
+              }
+            },
+            {
+              "include": "#number"
+            },
+            {
+              "include": "#operator"
+            }
+          ]
+        }
+      }
+    },
+    "declaration": {
+      "patterns": [
+        {
+          "match": "\\b(fn)\\s+([A-Za-z_\\p{L}][A-Za-z0-9_\\p{L}]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.function.anvil"
+            },
+            "2": {
+              "name": "entity.name.function.anvil"
+            }
+          }
+        },
+        {
+          "match": "\\b(model|optimizer)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.class.anvil"
+            },
+            "2": {
+              "name": "entity.name.type.class.anvil"
+            }
+          }
+        },
+        {
+          "match": "\\b(param)\\s+([A-Za-z_\\p{L}][A-Za-z0-9_\\p{L}]*)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.param.anvil"
+            },
+            "2": {
+              "name": "variable.other.member.param.anvil"
+            }
+          }
+        },
+        {
+          "match": "\\b(const)\\s+([A-Za-z_\\p{L}][A-Za-z0-9_\\p{L}]*)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.anvil"
+            },
+            "2": {
+              "name": "variable.other.constant.anvil"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(state)\\b",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.anvil"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(step)\\s*(?=\\()",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.anvil"
+            }
+          }
+        },
+        {
+          "match": "\\b(static)\\s+(?=for\\b)",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.static.anvil"
+            }
+          }
+        },
+        {
+          "match": "^\\s*(use)\\s+(?=\")",
+          "captures": {
+            "1": {
+              "name": "keyword.control.import.anvil"
+            }
+          }
+        }
+      ]
+    },
+    "annotation": {
+      "comment": "x: i32[B, T] = …, W: [784, 128] ~ …, fn f(x: [n, d]) -> [n, k]",
+      "match": "(:|->|→)\\s*(f32|i32)?\\s*(\\[)([^\\]]*)(\\])",
+      "captures": {
+        "1": {
+          "name": "punctuation.separator.annotation.anvil"
+        },
+        "2": {
+          "name": "support.type.primitive.anvil"
+        },
+        "3": {
+          "name": "punctuation.definition.shape.begin.anvil"
+        },
+        "4": {
+          "name": "meta.shape.anvil",
+          "patterns": [
+            {
+              "include": "#number"
+            },
+            {
+              "include": "#operator"
+            },
+            {
+              "name": "entity.name.type.dimension.anvil",
+              "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+            }
+          ]
+        },
+        "5": {
+          "name": "punctuation.definition.shape.end.anvil"
+        }
+      }
+    },
+    "string": {
+      "name": "string.quoted.double.anvil",
+      "begin": "f?\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.anvil",
+          "match": "\\\\(?:x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|.)|\\{\\{|\\}\\}"
+        },
+        {
+          "name": "meta.interpolation.anvil",
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.begin.anvil"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.interpolation.end.anvil"
+            }
+          },
+          "patterns": [
+            {
+              "name": "storage.type.format.anvil",
+              "match": ":[<>^+0-9.]*[fegd%]?(?=\\})"
+            },
+            {
+              "include": "#number"
+            },
+            {
+              "include": "#builtin"
+            },
+            {
+              "include": "#operator"
+            },
+            {
+              "include": "#call"
+            }
+          ]
+        }
+      ]
+    },
+    "keyword": {
+      "patterns": [
+        {
+          "name": "keyword.control.anvil",
+          "match": "\\b(if|elif|else|for|in|while|break|continue|return|pass|assert)\\b"
+        },
+        {
+          "name": "keyword.other.training.anvil",
+          "match": "\\b(minimize|maximize|with|over)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.anvil",
+          "match": "\\b(and|or|not)\\b"
+        },
+        {
+          "name": "constant.language.anvil",
+          "match": "\\b(true|false|inf|pi|nan)\\b|∞"
+        }
+      ]
+    },
+    "type": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.anvil",
+          "match": "\\b(f32|i32)\\b"
+        }
+      ]
+    },
+    "distribution": {
+      "match": "(~)\\s*(normal|uniform|bernoulli|randint)\\b",
+      "captures": {
+        "1": {
+          "name": "keyword.operator.sample.anvil"
+        },
+        "2": {
+          "name": "support.function.distribution.anvil"
+        }
+      }
+    },
+    "builtin": {
+      "patterns": [
+        {
+          "name": "keyword.operator.reduction.anvil",
+          "match": "\\b(sum|mean|max|min|prod|argmax|argmin)\\b|[Σ∑∏]"
+        },
+        {
+          "name": "support.class.layer.anvil",
+          "match": "\\b(Linear|Conv2d|LayerNorm|Embedding)\\b"
+        },
+        {
+          "name": "support.function.optimizer.anvil",
+          "match": "\\b(sgd|adam|rmsprop)\\b(?=\\s*\\()"
+        },
+        {
+          "name": "support.function.anvil",
+          "match": "\\b(exp|log|sqrt|abs|tanh|sigmoid|sin|cos|floor|ceil|round|sign|rsqrt|detach|grad|pow|where|zeros|ones|full|arange|eye|linspace|randn|rand|reshape|flatten|transpose|len|copy|print|range|batches|idx|seed|clock|normal|uniform|bernoulli|randint|show|sleep|input|nonzero|stack|csv|bytes|decode|save|load|relu|leaky_relu|elu|gelu|silu|softplus|softmax|log_softmax|layer_norm|cross_entropy|mse|bce|bce_with_logits|accuracy|onehot|max_pool2d|f32|i32|int|float)\\b(?=\\s*\\(|\\s*$|\\s*\\)|\\s*,|\\s*\\|)"
+        },
+        {
+          "name": "support.function.anvil",
+          "match": "∇|√"
+        }
+      ]
+    },
+    "number": {
+      "name": "constant.numeric.anvil",
+      "match": "(?<![A-Za-z_])(\\d[\\d_]*\\.?[\\d_]*([eE][+-]?\\d+)?|\\.\\d+([eE][+-]?\\d+)?)\\b"
+    },
+    "operator": {
+      "patterns": [
+        {
+          "name": "keyword.operator.pipe.anvil",
+          "match": "\\|>"
+        },
+        {
+          "name": "keyword.operator.arrow.anvil",
+          "match": "->|→"
+        },
+        {
+          "name": "keyword.operator.sample.anvil",
+          "match": "~"
+        },
+        {
+          "name": "keyword.operator.ellipsis.anvil",
+          "match": "\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.matmul.anvil",
+          "match": "@"
+        },
+        {
+          "name": "keyword.operator.assignment.augmented.anvil",
+          "match": "\\+=|-=|\\*=|/="
+        },
+        {
+          "name": "keyword.operator.anvil",
+          "match": "\\*\\*|//|[-+*/%<>=!]=?|[≤≥≠·]"
+        }
+      ]
+    },
+    "call": {
+      "match": "\\b([A-Za-z_\\p{L}][A-Za-z0-9_\\p{L}]*)\\s*(?=\\()",
+      "captures": {
+        "1": {
+          "name": "entity.name.function.call.anvil"
+        }
+      }
+    },
+    "index-contents": {
+      "patterns": [
+        {
+          "name": "keyword.operator.ellipsis.anvil",
+          "match": "\\.\\.\\."
+        },
+        {
+          "include": "#number"
+        },
+        {
+          "include": "#operator"
+        },
+        {
+          "begin": "([A-Za-z_][A-Za-z0-9_]*)(\\[)",
+          "end": "\\]",
+          "beginCaptures": {
+            "1": {
+              "name": "variable.other.anvil"
+            },
+            "2": {
+              "name": "punctuation.section.brackets.begin.anvil"
+            }
+          },
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.section.brackets.end.anvil"
+            }
+          },
+          "patterns": [
+            {
+              "include": "#index-contents"
+            }
+          ]
+        },
+        {
+          "name": "variable.parameter.index.anvil",
+          "match": "\\b[a-z_][A-Za-z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}

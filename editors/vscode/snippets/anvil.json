@@ -1,0 +1,45 @@
+{
+  "Index definition": {
+    "prefix": "def",
+    "body": ["${1:y}[${2:i}] = sum ${3:W}[${2:i}, ${4:j}] * ${5:x}[${4:j}]"],
+    "description": "A tensor defined by index notation (indices not on the left are summed)"
+  },
+  "Function": {
+    "prefix": "fn",
+    "body": ["fn ${1:name}(${2:x}) = ${0:x}"],
+    "description": "A one-line function"
+  },
+  "Model": {
+    "prefix": "model",
+    "body": [
+      "model ${1:Net}:",
+      "\t${2:l1} = Linear(${3:784}, ${4:128})",
+      "\t${5:l2} = Linear(${4:128}, ${6:10})",
+      "\tfn forward(x) = x |> ${2:l1} |> relu |> ${5:l2}",
+      "",
+      "${7:net} = ${1:Net}()"
+    ],
+    "description": "A model with two layers and a forward function"
+  },
+  "Training loop": {
+    "prefix": "train",
+    "body": [
+      "for epoch in range(${1:5}):",
+      "\tfor x, y in batches(${2:X}, ${3:Y}, size=${4:64}, shuffle=true):",
+      "\t\tloss = cross_entropy(${5:net}(x), y)",
+      "\t\tminimize loss with adam(lr=${6:1e-3})",
+      "\tprint(\"epoch {epoch + 1}   loss {loss:.4f}\")"
+    ],
+    "description": "Shuffled mini-batches and minimize"
+  },
+  "Param": {
+    "prefix": "param",
+    "body": ["param ${1:W}: [${2:784}, ${3:128}] ~ normal(0, ${4:0.05})"],
+    "description": "A trainable parameter, randomly initialized"
+  },
+  "Static for (unrolled)": {
+    "prefix": "sfor",
+    "body": ["static for ${1:t} in range(${2:T}):", "\t$0"],
+    "description": "A loop unrolled at compile time: gradients flow through every step"
+  }
+}

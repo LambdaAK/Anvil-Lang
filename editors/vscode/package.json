@@ -1,0 +1,66 @@
+{
+  "name": "anvil-language",
+  "displayName": "Anvil",
+  "description": "Anvil: errors as you type, tensor shapes on hover and after definitions, syntax highlighting and snippets",
+  "version": "0.3.1",
+  "publisher": "anvil-lang",
+  "engines": {
+    "vscode": "^1.65.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:anvil"
+  ],
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "anvil",
+        "aliases": [
+          "Anvil",
+          "anvil"
+        ],
+        "extensions": [
+          ".anvil"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "anvil",
+        "scopeName": "source.anvil",
+        "path": "./syntaxes/anvil.tmLanguage.json"
+      }
+    ],
+    "snippets": [
+      {
+        "language": "anvil",
+        "path": "./snippets/anvil.json"
+      }
+    ],
+    "configuration": {
+      "title": "Anvil",
+      "properties": {
+        "anvil.path": {
+          "type": "string",
+          "default": "",
+          "description": "The anvil command. Empty: bin/anvil of the Anvil checkout above the file, else `anvil` on the PATH, else `python3 -m anvil`."
+        },
+        "anvil.checkOnType": {
+          "type": "boolean",
+          "default": true,
+          "description": "Check the program as you type (otherwise on open and save)."
+        },
+        "anvil.inlayHints": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show each tensor's shape after its definition."
+        }
+      }
+    }
+  },
+  "license": "MIT"
+}
