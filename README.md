@@ -112,6 +112,71 @@ Install the `anvil` command:
 pip install -e .
 ```
 
+## From Python
+
+`anvil.function` turns Anvil source into a Python function on NumPy arrays. The first call with new
+shapes compiles it to native code (a shared library, cached in `~/.cache/anvil`); the arrays are passed
+by pointer, never copied.
+
+```python
+import numpy as np
+import anvil
+
+attention = anvil.function("""
+fn attention(q: [b, t, d], k: [b, t, d], v: [b, t, d]):
+    s[n, i, j] = sum q[n, i, c] * k[n, j, c] / sqrt(d) + (0.0 if j <= i else -1e9)
+    return softmax(s) @ v
+""")
+
+q, k, v = (np.random.randn(16, 256, 64).astype(np.float32) for _ in range(3))
+out = attention(q, k, v)            # [16, 256, 64], float32
+```
+
+- Floating-point arrays become `f32` tensors; integer and boolean arrays become `i32` tensors.
+- Python numbers and strings are compile-time constants, so they can set shapes or loop counts.
+  A new value compiles a new version.
+- Functions can return several results, and they can use `grad`. For example, this returns a
+  loss and its gradient for a training loop written in Python:
+
+```python
+step = anvil.function("""
+fn loss_and_grad(w: [d], x: [n, d], y: [n]):
+    loss = mean((x @ w - y) ** 2)
+    return loss, grad(loss, w)
+""")
+loss, g = step(w, x, y)
+```
+
+| called from Python (M3 Max, busy) | `anvil.function` | NumPy + Accelerate | |
+|---|---|---|---|
+| layer norm, 4096×1024 | 0.25 ms | 4.7 ms | **19×** |
+| softmax over rows, 4096×1024 | 0.76 ms | 8.3 ms | **11×** |
+| causal attention, 16×256×64 | 1.30 ms | 4.8 ms | **3.7×** |
+| `gelu(x @ W + b)`, 256×1024 → 1024 | 0.40 ms | 1.23 ms | **3.1×** |
+
+NumPy makes a separate pass over memory for each operation, and runs most of them on one core.
+Anvil fuses each function into a few multithreaded loops. Where NumPy spends its time in one large
+matrix multiply, Apple's AMX coprocessor makes up the difference (last row).
+
+**In Jupyter**, `%load_ext anvil` adds `%%anvil` cells. A cell of declarations defines its functions
+in the notebook (as `anvil.function`s). Any other cell is compiled and run, and what it prints
+appears as it runs:
+
+```python
+%%anvil
+fn attention(q: [t, d], k: [t, d], v: [t, d]) = softmax(q @ k.T / sqrt(d)) @ v
+```
+
+```python
+%%anvil --check
+x = npy("activations.npy")
+print(mean(log(x)))
+```
+
+A function's arguments are passed by pointer. The rest of the source is computed once, when the
+function is compiled, and built in: models, weights from `load`, tables. A call then only computes
+the function. The digit reader of `bin/draw` takes 0.04 ms a call.
+
 ## A tour of the language
 
 ### Tensors, shapes, broadcasting
@@ -342,6 +407,95 @@ Lk86_loop3:
 ```
 
 There is more detail in [docs/PLAN.md](docs/PLAN.md), the design document.
+
+## CUDA
+
+```bash
+bin/anvil cuda examples/mnist.anvil          # writes examples/mnist.cu
+nvcc -O3 -o mnist examples/mnist.cu -lz  # on a machine with an NVIDIA GPU
+bin/anvil run --cuda examples/mnist.anvil    # both steps, then run it
+```
+
+The `.cu` file is self-contained:
+- **Kernels.** Each Anvil kernel becomes a `__global__` function with one thread per output
+  element. A reduction is a loop inside the thread.
+- **Long reductions.** When a kernel has few outputs and a long reduction, such as a loss summed
+  over a batch, the reduction is split across up to 1,024 threads per output and the partial
+  results are combined in a second kernel.
+- **Scatters.** Scatter-adds (`counts[labels[i]] += 1`, and the gradients of gathers) use
+  `atomicAdd`.
+- **Order-dependent kernels.** A kernel whose result depends on the order of its elements runs
+  on a single thread.
+- **Memory and host code.** Tensors live in unified memory. The host code holds the control flow,
+  printing, data loading, checkpoints and `input`, as in the ARM64 backend.
+- **Random numbers.** The generator is the same counter-based hash, so a program draws the same
+  random numbers on the GPU as on the CPU.
+
+Shapes are fixed when the program is compiled, and data files are read from where they were
+then. To run the `.cu` file on another machine, copy the same data files there and set `ANVIL_DATA` to
+their directory.
+
+There is no NVIDIA GPU on the machine this was developed on, so the generated code is tested two
+other ways:
+- `--cuda-emulate` compiles the same `.cu` file as C++ (`-DANVIL_EMULATE` turns each kernel launch
+  into a loop). The tests run the examples this way and compare the output with the reference
+  interpreter.
+- clang's CUDA front end type-checks every example's `.cu` for the device and the host. This
+  catches a host function called from a kernel, for instance.
+
+Running it on a real GPU is the next step. Performance there is unmeasured, and the simple
+one-thread-per-output kernels do not use shared memory yet.
+
+## Tools
+
+| Command | |
+|---|---|
+| `anvil run file.anvil` | compile to native code and run it (`--seed N`, `-O0`, `-v`) |
+| `anvil run --profile file.anvil` | time every kernel; prints a breakdown by source line at exit |
+| `anvil run --interp file.anvil` | run on the NumPy reference interpreter instead |
+| `anvil run file.anvil --set N=V` | give the program's `const N` the value `V` instead (repeatable) |
+| `anvil build file.anvil [-o exe]` | a standalone executable, plus a memory report |
+| `anvil asm file.anvil [-o out.s]` | the generated assembly |
+| `anvil run --metal file.anvil` | run on the Apple GPU (`anvil metal file.anvil`: write the Objective-C++ / Metal file) |
+| `anvil run --check file.anvil` | stop at the first NaN (`--check=inf`: or infinity), with the line that made it |
+| `anvil cost file.anvil` | parameters, memory, FLOPs and memory traffic, line by line, before running |
+| `anvil export file.anvil [-o dir]` | a function as a C library and header, weights built in (`--fn NAME`) |
+| `anvil cuda file.anvil [-o out.cu]` | the program as one CUDA file |
+| `anvil run --cuda file.anvil` | build with `nvcc` and run (`--cuda-emulate`: as C++ on the CPU) |
+| `anvil ir file.anvil` | the optimized kernel IR, in math notation |
+| `anvil check file.anvil` | type- and shape-check only (`--json`: errors and every name's shape, for editors) |
+| `anvil repl` | try Anvil a line at a time (on the reference interpreter) |
+| `ANVIL_THREADS=n` | worker threads (default: performance cores, at most 8) |
+| `ANVIL_BLAS=0` | matrix products in Anvil's own kernels instead of Accelerate (the AMX coprocessor) |
+
+```
+$ bin/anvil run --profile examples/mnist.anvil
+  time%        ms      calls   kernel
+  17.4%      89.4       4685   k70    copy                    mnist.anvil:26
+  25.5%     131.0       4685   k86    matmul+add              mnist.anvil:27
+  13.4%      69.0       4685   k186   ∂matmul+∂max            mnist.anvil:28
+  25.7%     131.7       4685   k208   ∂matmul+sub             mnist.anvil:28
+   ...
+```
+
+**In VS Code and Cursor**, the extension in [`editors/vscode/`](editors/vscode/) runs the
+compiler as you type:
+- **Errors** are underlined where they happen. An error inside the standard library is underlined
+  at the call in your file that led to it.
+- **Hovers.** Hovering over any name shows what it holds: `f32[64, 784]`, `index j < 10`, a
+  function's signature, or a model's parameters and their count.
+- **Shapes after definitions.** Every tensor definition shows its shape after the name, as
+  `h: f32[64, 128] = …`.
+
+It also highlights syntax (index notation, shapes, `where`, f-strings) and has snippets:
+
+```bash
+python3 editors/vscode/package_vsix.py
+cursor --install-extension editors/vscode/anvil-language-0.3.1.vsix     # or: code --install-extension …
+```
+
+The editor gets all of this from `anvil check --json`, which elaborates the program without
+generating code: about 50 ms for MNIST.
 
 ## Examples
 
@@ -614,6 +768,91 @@ seconds and saves the critic to `examples/checkers.weights`. After that, the gam
 away. To train a fresh critic, delete that file or run the example again, which always trains
 and saves. `bin/checkers` is just the example with `--set PLAY=1 --set WATCH=0`. `--set` gives
 any `const` in a program a new value without editing the file.
+
+## Performance
+
+Everything here is measured on an Apple M3 Max. [`benchmarks/run.py`](benchmarks/run.py) produces
+[`benchmarks/results.md`](benchmarks/results.md), and [`experiments/run.py`](experiments/run.py)
+produces [`experiments/results.md`](experiments/results.md). Both files record the load average of
+the run that made them. The table below was measured while other programs kept the machine busy
+(load average about 16), which slows both sides down.
+
+| Anvil against NumPy + Accelerate | Anvil | NumPy | |
+|---|---|---|---|
+| MNIST MLP training epoch (784-128-10, batch 64, SGD) | 0.066 s | 0.121 s | **1.8×** |
+| matmul 1024³ | 0.94 ms (2,276 GFLOP/s) | 1.21 ms (1,775 GFLOP/s) | **1.3×** |
+| `gelu(x @ W + b)`, 256×1024 → 1024 | 0.52 ms | 0.96 ms | **1.9×** |
+| softmax over rows, 4096×1024 | 1.00 ms | 10.5 ms | **10×** |
+| layer norm, 4096×1024 | 0.58 ms | 7.0 ms | **12×** |
+| causal attention, 16×256×64 | 1.27 ms | 4.4 ms | **3.5×** |
+| `gelu(1.01x + 0.1) · sigmoid(x)` on 4M floats | 5.6 ms | 17.4 ms | **3.1×** |
+
+- **Fusion.** Anvil wins wherever the time goes to memory traffic and transcendental functions: it
+  fuses each of these computations into one or two multithreaded passes. NumPy makes a pass per
+  operation, mostly on one core.
+- **Matrix products.** These go to Apple's AMX matrix coprocessor through Accelerate's
+  `cblas_sgemm`, as NumPy's do, but with the epilogue (bias, activation, optimizer update) fused
+  into Anvil's own kernels around it. Stacks of products (attention heads) and sums of products (a
+  convolution's weight gradient) go there too. `ANVIL_BLAS=0` keeps every product in Anvil's own NEON
+  kernels, which reach about 600 GFLOP/s on 8 cores; with Accelerate, a 1024³ product runs at about
+  2,300 GFLOP/s.
+- **Whole training steps.** Each step is a few fused kernels on static buffers, with no
+  per-operation overhead.
+- **The GPU.** Bigger models run faster still with `--metal` ([above](#on-the-gpu-metal)).
+
+**What the optimizations are worth**, in seconds per MNIST epoch (from the ablation experiment,
+before matrix products went to the AMX coprocessor):
+
+| | MLP 784-128-10 | MLP 784-1024-1024-10 | LeNet CNN |
+|---|---|---|---|
+| everything on | 0.096 s | 1.98 s | 0.85 s |
+| one thread | 0.28 s (2.9×) | 10.95 s (5.5×) | 3.20 s (3.8×) |
+| no IR optimizations (`-O0`) | 0.137 s (1.4×) | 2.05 s (1.0×) | 2.35 s (2.8×) |
+| `-O0`, one thread | 0.32 s (3.3×) | 10.23 s (5.2×) | 8.15 s (9.6×) |
+
+- Fusion matters most where there are many small kernels, as in the CNN and the small MLP.
+- In the wide MLP almost all the time is in large matrix multiplies, so threads (5.5×) are what
+  count there.
+- The experiments also found three performance bugs, now fixed:
+  - In a fused optimizer update, the old weights were loaded before the matmul's loop, so the
+    kernel fell back to a smaller register tile.
+  - `relu(z)` was inlined into a matmul operand and recomputed once per 16 output columns.
+  - Small but expensive kernels (the Adam update of a 784×128 matrix, the copy of a shuffled
+    batch) ran on one thread.
+
+  Together these cut the wide MLP from 2.23 to 1.98 s/epoch and Adam training at width 128 from
+  0.150 to 0.100 s/epoch.
+- **Row-tiled dot products.** The wide MLP's backward pass computes `dz @ Wᵀ`, where both operands
+  are contiguous along the sum, so each output is a dot product. That schedule now computes 4
+  outputs at once and shares the loads of `W`. The kernel went from 496 to 293 ms per epoch, the
+  wide MLP to 1.78 s/epoch, and the transformer and char-RNN train about 10% faster.
+
+**Hyperparameter sweeps are cheap.** At about 0.1 s per epoch, the two grids in the experiments (27
+MNIST models, 3 epochs each, every one compiled separately with `--set` on
+[`experiments/mnist_sweep.anvil`](experiments/mnist_sweep.anvil)) take under a minute:
+- Adam at lr 1e-3 is best after 3 epochs (97.47%), just ahead of RMSProp (97.37%) and SGD at lr 0.3
+  (97.21%).
+- Widening one hidden layer from 32 to 1,024 units takes accuracy from 95.3% to 97.8%.
+- A second hidden layer helps only up to 128 units.
+
+Compiling from scratch takes 0.3 s for MNIST and about 0.9 s for the transformer and checkers.
+
+**Against PyTorch.** [`benchmarks/vs_pytorch/`](benchmarks/vs_pytorch) holds nine small projects
+written in both Anvil and PyTorch 2.14, with the same models, data and hyperparameters, and checked to
+reach the same accuracy. The [report](benchmarks/vs_pytorch/REPORT.md) has every number. Speed-ups
+of Anvil are geometric means over the nine:
+
+| | Anvil is faster by |
+|---|---|
+| CPU, each at its defaults | 6.5× |
+| CPU, PyTorch at its best thread count | 3.6× |
+| CPU, one thread each | 2.3× |
+| CPU, against `torch.compile` | 7.9× |
+| GPU, Metal against PyTorch's MPS | 2.2× (but MPS is 5× faster on the larger CNN) |
+
+Small models gain the most (a softmax-regression step takes 26 µs against 158–374 µs), large matrix
+products the least (both use the AMX unit), and Anvil's Metal backend still loses to MPS on
+convolutions.
 
 ## Testing
 
