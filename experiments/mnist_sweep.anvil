@@ -1,0 +1,45 @@
+# mnist_sweep.anvil — the MNIST MLP with its hyperparameters as constants, for sweeps:
+#
+#     bin/anvil run experiments/mnist_sweep.anvil --set OPT="adam" --set LR=0.003 --set HIDDEN=256
+#
+# experiments/run.py runs grids of these and writes experiments/results.md.
+
+const OPT = "sgd"          # sgd | adam | rmsprop
+const LR = 0.1
+const HIDDEN = 128
+const DEPTH = 1            # hidden layers
+const BATCH = 64
+const EPOCHS = 3
+
+images = idx("../examples/data/train-images-idx3-ubyte.gz") / 255
+labels: i32[60000] = idx("../examples/data/train-labels-idx1-ubyte.gz")
+test_images = idx("../examples/data/t10k-images-idx3-ubyte.gz") / 255
+test_labels: i32[10000] = idx("../examples/data/t10k-labels-idx1-ubyte.gz")
+X = images.reshape(60000, 784)
+X_test = test_images.reshape(10000, 784)
+
+model MLP:
+    l1 = Linear(784, HIDDEN)
+    if DEPTH == 2:
+        l2 = Linear(HIDDEN, HIDDEN)
+    out = Linear(HIDDEN, 10)
+    fn forward(x):
+        h = relu(l1(x))
+        if DEPTH == 2:
+            h = relu(l2(h))
+        return out(h)
+
+net = MLP()
+start = clock()
+for epoch in range(EPOCHS):
+    for x, y in batches(X, labels, size=BATCH, shuffle=true):
+        loss = cross_entropy(net(x), y)
+        if OPT == "adam":
+            minimize loss with adam(lr=LR)
+        elif OPT == "rmsprop":
+            minimize loss with rmsprop(lr=LR)
+        else:
+            minimize loss with sgd(lr=LR)
+train_time = clock() - start
+acc = accuracy(net(X_test), test_labels)
+print("result {acc:.4f} {train_time / EPOCHS:.4f} {loss:.4f}")
