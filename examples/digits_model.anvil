@@ -1,0 +1,9 @@
+# digits_model.anvil — the network that reads hand-drawn digits. examples/digits.anvil trains it
+# (`use "digits_model.anvil"`), and the drawing app (bin/draw) runs it on what you draw.
+
+model DigitNet:
+    c1 = Conv2d(1, 16, 5)            # 28×28 -> 24×24, pooled to 12×12
+    c2 = Conv2d(16, 32, 5)           # 12×12 ->  8×8,  pooled to 4×4
+    fc1 = Linear(32 * 4 * 4, 128)
+    fc2 = Linear(128, 10)
+    fn forward(x) = x |> c1 |> relu |> max_pool2d |> c2 |> relu |> max_pool2d |> flatten(1) |> fc1 |> relu |> fc2
