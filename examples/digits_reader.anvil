@@ -1,0 +1,12 @@
+# digits_reader.anvil — the trained digit reader as a function: a 28×28 image in, the probability
+# of each digit out. Export it as a C library (with its weights built in):
+#
+#     bin/anvil export examples/digits_reader.anvil -o build/
+
+use "digits_model.anvil"
+
+net = DigitNet()
+found = load(net, "digits.weights")
+assert found == 1, "no trained network: run `bin/anvil run examples/digits.anvil` first"
+
+fn read(image: [28, 28]) = softmax(net(image.reshape(1, 1, 28, 28)))[0]
