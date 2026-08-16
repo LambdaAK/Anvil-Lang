@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Draw a digit</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --line: #262a33;
+    --text: #e8eaef;
+    --muted: #8b93a3;
+    --accent: #7cc4ff;
+    --accent-dim: #2b4a63;
+    --ink: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 16px 48px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 22px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .modes { display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; padding: 3px; }
+  .modes a { color: var(--muted); text-decoration: none; padding: 4px 12px; border-radius: 6px; font-size: 14px; }
+  .modes a.on { background: var(--line); color: var(--text); }
+  .sub { color: var(--muted); margin: 0 0 24px; }
+  .sub code { color: var(--text); font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .app { display: grid; grid-template-columns: auto 1fr; gap: 24px; align-items: start; }
+  @media (max-width: 720px) { .app { grid-template-columns: 1fr; } }
+
+  .pad { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  .canvas-wrap { position: relative; width: min(340px, calc(100vw - 62px)); aspect-ratio: 1; }
+  #pad { width: 100%; height: 100%; display: block; border-radius: 10px; background: #000;
+    touch-action: none; cursor: crosshair; }
+  .hint { position: absolute; inset: 0; display: grid; place-items: center; color: #4a5160;
+    font-size: 17px; pointer-events: none; transition: opacity .2s; }
+  .hint.hidden { opacity: 0; }
+  .tools { display: flex; gap: 8px; margin-top: 12px; }
+  button { flex: 1; background: transparent; color: var(--text); border: 1px solid var(--line);
+    border-radius: 9px; padding: 9px 12px; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  kbd { font: 11px ui-monospace, Menlo, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; margin-left: 6px; }
+
+  .result { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; }
+  .top { display: flex; align-items: center; gap: 18px; margin-bottom: 14px; min-height: 92px; }
+  .guess { font-size: 84px; font-weight: 700; line-height: 1; width: 64px; text-align: center;
+    font-variant-numeric: tabular-nums; }
+  .guess.none { color: #3a404c; }
+  .conf { color: var(--muted); }
+  .conf strong { color: var(--text); font-size: 20px; font-weight: 650; display: block; }
+  .bars { display: grid; gap: 5px; }
+  .bar { display: grid; grid-template-columns: 16px 1fr 46px; align-items: center; gap: 10px;
+    font-variant-numeric: tabular-nums; }
+  .bar .d { color: var(--muted); text-align: right; }
+  .bar .track { height: 12px; background: #1f232c; border-radius: 6px; overflow: hidden; }
+  .bar .fill { height: 100%; width: 0; background: var(--accent-dim); border-radius: 6px;
+    transition: width .12s ease-out; }
+  .bar.best .fill { background: var(--accent); }
+  .bar.best .d { color: var(--text); font-weight: 650; }
+  .bar .p { color: var(--muted); font-size: 13px; text-align: right; }
+  .seen { display: flex; gap: 14px; align-items: center; margin-top: 18px; padding-top: 16px;
+    border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+  #seen { width: 84px; height: 84px; image-rendering: pixelated; border-radius: 6px; background: #000;
+    border: 1px solid var(--line); flex: none; }
+  .error { color: #ff8f8f; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Draw a digit</h1>
+    <nav class="modes"><a href="/" class="on">Digits</a><a href="/text">Text</a></nav>
+  </header>
+  <p class="sub">A convolutional network written in Anvil (<code>examples/digits_model.anvil</code>),
+    compiled to native code, reads it as you draw.</p>
+  <div class="app">
+    <div class="pad">
+      <div class="canvas-wrap">
+        <canvas id="pad"></canvas>
+        <div class="hint" id="hint">draw 0 – 9 here</div>
+      </div>
+      <div class="tools">
+        <button id="undo">Undo<kbd>Z</kbd></button>
+        <button id="clear">Clear<kbd>C</kbd></button>
+      </div>
+    </div>
+    <div class="result">
+      <div class="top">
+        <div class="guess none" id="guess">?</div>
+        <div class="conf" id="conf"><strong>&nbsp;</strong>draw a digit to see what the network reads</div>
+      </div>
+      <div class="bars" id="bars"></div>
+      <div class="seen">
+        <canvas id="seen" width="28" height="28"></canvas>
+        <div>What the network sees: your drawing scaled into a 20×20 box and centered in 28×28
+          pixels by its center of mass, the way MNIST's digits are. <span id="timing"></span></div>
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+"use strict";
+const pad = document.getElementById("pad");
+const ctx = pad.getContext("2d");
+const seen = document.getElementById("seen").getContext("2d");
+const bars = document.getElementById("bars");
+let strokes = [];          // lists of [x, y], in CSS pixels
+let drawing = null;
+let pending = false, inflight = false;
+
+for (let d = 0; d < 10; d++) {
+  bars.insertAdjacentHTML("beforeend",
+    `<div class="bar" id="bar${d}"><span class="d">${d}</span><div class="track"><div class="fill"></div></div><span class="p"></span></div>`);
+}
+
+function resize() {
+  const r = pad.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  pad.width = Math.round(r.width * dpr);
+  pad.height = Math.round(r.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  redraw();
+}
+
+function redraw() {
+  const w = pad.clientWidth;
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, w, w);
+  ctx.strokeStyle = "#ffffff";
+  ctx.fillStyle = "#ffffff";
+  ctx.lineWidth = Math.max(10, w / 18);
+  ctx.lineCap = ctx.lineJoin = "round";
+  for (const s of strokes) {
+    ctx.beginPath();
+    ctx.moveTo(s[0][0], s[0][1]);
+    if (s.length === 1) ctx.lineTo(s[0][0] + 0.01, s[0][1]);
+    for (const [x, y] of s.slice(1)) ctx.lineTo(x, y);
+    ctx.stroke();
+  }
+  document.getElementById("hint").classList.toggle("hidden", strokes.length > 0);
+}
+
+function point(e) {
+  const r = pad.getBoundingClientRect();
+  return [+(e.clientX - r.left).toFixed(1), +(e.clientY - r.top).toFixed(1)];
+}
+
+pad.addEventListener("pointerdown", (e) => {
+  pad.setPointerCapture(e.pointerId);
+  drawing = [point(e)];
+  strokes.push(drawing);
+  redraw();
+  ask();
+});
+pad.addEventListener("pointermove", (e) => {
+  if (!drawing) return;
+  const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  for (const ev of events) drawing.push(point(ev));
+  redraw();
+  ask();
+});
+const end = () => { if (drawing) { drawing = null; ask(); } };
+pad.addEventListener("pointerup", end);
+pad.addEventListener("pointercancel", end);
+
+function clearAll() { strokes = []; redraw(); show(null); }
+function undo() { strokes.pop(); redraw(); strokes.length ? ask() : show(null); }
+document.getElementById("clear").onclick = clearAll;
+document.getElementById("undo").onclick = undo;
+window.addEventListener("keydown", (e) => {
+  if (e.key === "c" || e.key === "Escape") clearAll();
+  if (e.key === "z" || ((e.metaKey || e.ctrlKey) && e.key === "z")) { e.preventDefault(); undo(); }
+});
+
+// at most one request in flight; the latest drawing wins
+async function ask() {
+  if (inflight) { pending = true; return; }
+  if (!strokes.length) return;
+  inflight = true;
+  try {
+    const res = await fetch("/read", { method: "POST", headers: { "Content-Type": "application/json" },
+                                       body: JSON.stringify({ strokes }) });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (strokes.length) show(data);
+  } catch (err) {
+    document.getElementById("conf").innerHTML = `<strong class="error">no answer</strong>${err.message} (is bin/draw still running?)`;
+  } finally {
+    inflight = false;
+    if (pending) { pending = false; ask(); }
+  }
+}
+
+function show(data) {
+  const guess = document.getElementById("guess");
+  const conf = document.getElementById("conf");
+  if (!data || data.empty) {
+    guess.textContent = "?";
+    guess.classList.add("none");
+    conf.innerHTML = "<strong>&nbsp;</strong>draw a digit to see what the network reads";
+    for (let d = 0; d < 10; d++) {
+      const b = document.getElementById("bar" + d);
+      b.classList.remove("best");
+      b.querySelector(".fill").style.width = "0";
+      b.querySelector(".p").textContent = "";
+    }
+    seen.clearRect(0, 0, 28, 28);
+    document.getElementById("timing").textContent = "";
+    return;
+  }
+  const p = data.probs, best = data.digit;
+  guess.textContent = best;
+  guess.classList.remove("none");
+  const sure = p[best];
+  const runner = p.map((v, d) => [v, d]).filter(([, d]) => d !== best).sort((a, b) => b[0] - a[0])[0];
+  conf.innerHTML = `<strong>${(sure * 100).toFixed(sure > 0.995 ? 1 : 0)}% sure</strong>` +
+    (runner[0] > 0.05 ? `or maybe a ${runner[1]} (${(runner[0] * 100).toFixed(0)}%)` : "nothing else comes close");
+  for (let d = 0; d < 10; d++) {
+    const b = document.getElementById("bar" + d);
+    b.classList.toggle("best", d === best);
+    b.querySelector(".fill").style.width = `${Math.max(0.5, p[d] * 100)}%`;
+    b.querySelector(".p").textContent = p[d] >= 0.001 ? `${(p[d] * 100).toFixed(p[d] < 0.1 ? 1 : 0)}%` : "";
+  }
+  const img = seen.createImageData(28, 28);
+  data.image.forEach((v, i) => {
+    const g = Math.round(v * 255);
+    img.data.set([g, g, g, 255], i * 4);
+  });
+  seen.putImageData(img, 0, 0);
+  document.getElementById("timing").textContent = `(read in ${data.ms} ms)`;
+}
+
+window.addEventListener("resize", resize);
+resize();
+</script>
+</body>
+</html>
