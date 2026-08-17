@@ -1,0 +1,9 @@
+#!/bin/sh
+# Draw digits, or write words, in your browser; networks written in Anvil read them as you draw.
+# The first time, it trains the digit network (examples/digits.anvil) and saves it. Options:
+#     bin/draw --text              the page for handwritten English (trains the letter network
+#                                  on EMNIST first, if it hasn't been)
+#     bin/draw --port 9000         serve on another port
+#     bin/draw --no-browser        don't open the page; go to the address it prints
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+exec python3 "$DIR/examples/draw/server.py" "$@"
