@@ -1,0 +1,81 @@
+# diffusion.anvil — a denoising diffusion model (DDPM) learns to draw MNIST digits out of noise.
+#
+#     bin/anvil run examples/diffusion.anvil
+#
+# Training: take a digit, drown it in a random amount of Gaussian noise (level t of T), and teach
+# a network to recover the clean digit, given the noisy image, t, and which digit it is.
+# Drawing: start from pure noise and step from level T down to 0, each time moving towards the
+# network's guess of the clean image and adding back a little fresh noise (the DDPM posterior).
+# Because the network is told the digit, it draws whichever digit it is asked for. Hiding the label
+# now and then during training teaches it to draw "any digit" too; leaning away from that towards
+# the digit asked for (classifier-free guidance) makes the drawings much cleaner.
+
+const EPOCHS = 20
+const T = 200                # noise levels
+const H = 512                # width of the denoiser
+const BATCH = 128
+const PER_DIGIT = 2          # drawings of each digit at the end
+const GUIDANCE = 2.0         # how strongly drawings lean towards the digit asked for
+
+images = idx("data/train-images-idx3-ubyte.gz") / 255
+labels: i32[60000] = idx("data/train-labels-idx1-ubyte.gz")
+X = images.reshape(60000, 784) * 2 - 1                 # pixels in [-1, 1]
+
+# the noise schedule: the noise added at each level, and how much of the image is left after t
+beta[t] = (1e-4 + (0.02 - 1e-4) * t / (T - 1)) * 1000 / T where t < T
+alpha = 1 - beta
+alpha_bar[t] = prod (alpha[s] if s <= t else 1.0) where t < T
+alpha_bar_prev[t] = prod (alpha[s] if s < t else 1.0) where t < T     # alpha_bar[t - 1], and 1 at t = 0
+
+model Denoiser:
+    inp = Linear(784, H)
+    level = Embedding(T, H)          # a learned vector for each noise level
+    digit = Embedding(11, H)         # … and for each digit, and 10 for "any digit"
+    mid1 = Linear(H, H)
+    mid2 = Linear(H, H)
+    out = Linear(H, 784)
+    fn forward(x, t, c):
+        h = silu(inp(x) + 0.3 * (level(t) + digit(c)))
+        h = h + silu(mid1(layer_norm(h)))
+        h = h + silu(mid2(layer_norm(h)))
+        return tanh(out(layer_norm(h)))      # its guess of the clean digit
+
+net = Denoiser()
+
+start = clock()
+for epoch in range(EPOCHS):
+    for x0, c in batches(X, labels, size=BATCH, shuffle=true):
+        t: i32[BATCH] ~ randint(0, T)
+        noise: [BATCH, 784] ~ normal(0, 1)
+        hide: [BATCH] ~ bernoulli(0.1)
+        label[b] = 10 if hide[b] > 0 else c[b]     # sometimes it must manage without the label
+        xt[b, p] = sqrt(alpha_bar[t[b]]) * x0[b, p] + sqrt(1 - alpha_bar[t[b]]) * noise[b, p]
+        loss = mse(net(xt, t, label), x0)
+        minimize loss with adam(lr=1e-3)
+    print("epoch {epoch + 1:2d}   loss {loss:.4f}   ({clock() - start:.1f}s)")
+
+# draw: each of the digits 0-9, PER_DIGIT times, from pure noise
+N = 10 * PER_DIGIT
+want[n] = n % 10 where n < N
+anything: i32[N] = 10
+x: [N, 784] ~ normal(0, 1)
+for k in range(T):
+    s = T - 1 - k                    # the noise level, from the most to none
+    level: i32[N] = s
+    # classifier-free guidance: lean away from "any digit" towards the digit asked for
+    sure = net(x, level, want)
+    unsure = net(x, level, anything)
+    guess = min(max(sure + GUIDANCE * (sure - unsure), -1), 1)
+    z: [N, 784] ~ normal(0, 1)
+    # the mean and spread of the image one level less noisy, given x and the guess
+    mean_x = (sqrt(alpha_bar_prev[s]) * beta[s] * guess + sqrt(alpha[s]) * (1 - alpha_bar_prev[s]) * x) / (1 - alpha_bar[s])
+    sigma = sqrt((1 - alpha_bar_prev[s]) / (1 - alpha_bar[s]) * beta[s])
+    x = mean_x + sigma * z
+
+# 2×2 pixels to a character: ▘ ▝ ▀ ▖ ▌ … █ (a quadrant is on where the pixel is light)
+on = f32(x > 0).reshape(N // 5, 5, 28, 28)
+quad[a, d, i, j] = on[a, d, 2*i, 2*j] + 2 * on[a, d, 2*i, 2*j + 1] + 4 * on[a, d, 2*i + 1, 2*j] + 8 * on[a, d, 2*i + 1, 2*j + 1] where i < 14, j < 14
+canvas: [N // 5 * 15, 5 * 16] = 0
+canvas[a * 15 + i, d * 16 + j] += quad[a, d, i, j]
+print("\ndigits it drew, 0 to 4 and 5 to 9:\n")
+show(i32(canvas), " ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█")
