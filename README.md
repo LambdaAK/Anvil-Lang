@@ -177,6 +177,28 @@ A function's arguments are passed by pointer. The rest of the source is computed
 function is compiled, and built in: models, weights from `load`, tables. A call then only computes
 the function. The digit reader of `bin/draw` takes 0.04 ms a call.
 
+## Deploying: anvil export
+
+`anvil export` turns an Anvil function into a C library and header. Everything the function reads from
+the rest of the program is computed once, when exporting, and built into the library: models,
+their trained weights (from `load`), tables. The library needs no weights file and no Python.
+
+```bash
+bin/anvil export examples/digits_reader.anvil -o build/
+```
+
+```c
+#include "digits_reader.h"            // void digits_reader_read(const float *image, float *out);
+
+float image[DIGITS_READER_READ_IMAGE_SIZE], probs[DIGITS_READER_READ_OUT_SIZE];
+digits_reader_read(image, probs);     // cc app.c -Lbuild -ldigits_reader -Wl,-rpath,build
+```
+
+[`examples/digits_reader.anvil`](examples/digits_reader.anvil) is the trained digit reader of
+`bin/draw` as a function, and its library is 700 KB. A C program that reads MNIST's test images
+with zlib gets 986 of the first 1,000 right with it. The arguments need concrete shapes
+(`image: [28, 28]`); calls from several threads take turns.
+
 ## A tour of the language
 
 ### Tensors, shapes, broadcasting
@@ -351,6 +373,42 @@ out-of-bounds windows, a non-scalar loss, and typos (which get "did you mean `so
 compiler reports every independent error in a file, up to 20, not just the first. A name whose
 definition failed is not reported again where it is used.
 
+## Finding bugs and costs
+
+**`--check` finds where a NaN comes from.** After every operation, the program looks for a NaN in
+what it just computed. The first one stops it, with the line and the operation:
+
+```
+$ bin/anvil run --check model.anvil
+anvil: --check: nan in `t3` (f32[4, 3]) at [0, 0]
+  made by `log` at model.anvil:3:1:
+      y = log(x - 0.5) * w
+  computing (k30):  t3[i, j] = log(t2[i, j])
+  its inputs held no nan or infinity: this computation made it
+```
+
+`--check=inf` stops at the first infinity too. When a NaN comes from infinities made earlier (say
+`inf - inf`), the message says so. `--check` compiles without fusion, so each operation is its own
+kernel and has its own line.
+
+**Warnings for training bugs.** The compiler warns when the objective does not depend on a
+parameter (`minimize` cannot train it), and when no `minimize` trains a `param` at all.
+
+**`anvil cost` tells you what a program costs before it runs.** Shapes and most loop counts are
+known when compiling, so the compiler counts every kernel's arithmetic and memory traffic and how
+often it runs:
+
+```
+$ bin/anvil cost examples/mnist.anvil
+mnist.anvil: 101,770 parameters (397.5 KB), memory 215.5 MB (data 209.6 MB, temp 5.3 MB, …)
+the whole run: 134.9 GFLOP, 12.7 GB of memory traffic (roughly 0.45 s at 300 GFLOP/s)
+
+  share      FLOP     traffic        runs   line
+  46.9%     63.2 G      6.0 GB       4,685   mnist.anvil:28     minimize loss with sgd(lr=0.1)
+  45.5%     61.4 G      3.2 GB       4,685   mnist.anvil:27     loss = cross_entropy(net(x), y)
+   7.5%     10.2 G    214.6 MB           5   mnist.anvil:29     acc = accuracy(net(X_test), test_labels)
+```
+
 ## What the compiler does
 
 ```
@@ -407,6 +465,36 @@ Lk86_loop3:
 ```
 
 There is more detail in [docs/PLAN.md](docs/PLAN.md), the design document.
+
+## On the GPU (Metal)
+
+```bash
+bin/anvil run --metal examples/transformer.anvil
+```
+
+`--metal` runs the program on the Apple GPU. `anvil metal file.anvil` writes the program as one
+Objective-C++ file, with the kernels in Metal Shading Language.
+- **Kernels.** They are generated as for CUDA: one thread per output element.
+- **Matrix products.** These, including stacks and sums of them, go to Metal Performance
+  Shaders.
+- **Memory.** Every tensor lives in shared memory.
+- **No waiting.** The host never waits for the GPU except to read what it computed: a print, a
+  branch on a computed value, a data file.
+- **Scalars on the CPU.** Loop counters, and scalars computed from them alone (`step % 100 == 0`,
+  Adam's step count), are computed on the CPU and copied into each kernel's arguments. A training
+  loop therefore runs without the CPU waiting on any step, and an `if` on the step number does not
+  stop the GPU.
+
+| one epoch (M3 Max) | CPU | GPU (`--metal`) | |
+|---|---|---|---|
+| MLP 784-1024-1024-10, batch 64 | 1.47 s | 0.40 s | **3.7×** |
+| MLP 784-2048-2048-10, batch 256 | 2.31 s | 0.45 s | **5.2×** |
+| the transformer, 500 steps | 1.3 s | 0.8 s | **1.6×** |
+| MLP 784-128-10 (small) | 0.067 s | 0.11 s | 0.6× |
+
+Small models are faster on the CPU: there, each step is a few microseconds of work per kernel,
+and a GPU dispatch costs about as much. The GPU's output matches the reference interpreter on every
+example (tested), random numbers included.
 
 ## CUDA
 
@@ -902,3 +990,12 @@ editors/vscode/ syntax highlighting for VS Code and Cursor
 tests/          pytest suite
 docs/PLAN.md    design document and roadmap
 ```
+
+## Status
+
+It covers the language in the design document, with four backends: native multithreaded
+AArch64/macOS (with the AMX coprocessor for matrix products), the Apple GPU (Metal), CUDA (tested in
+emulation; not yet on an NVIDIA GPU), and the NumPy interpreter. Anvil functions can be called from
+Python and Jupyter, and exported as C libraries. Not done yet: Linux/x86 backends, differentiation
+through run-time loops (`static for` unrolls instead), and dynamic shapes. See the
+[roadmap](docs/PLAN.md#8-roadmap) and [the list of ideas](docs/IDEAS.md).
