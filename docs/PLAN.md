@@ -510,3 +510,80 @@ Editor support: a TextMate grammar (`editors/vscode`) for highlighting in VS Cod
 | Static shapes feel rigid | shape variables + polymorphic functions; data shapes inferred from files; dynamic batch on roadmap |
 
 ---
+
+## 10. MVP status (October 2026)
+
+**Built and tested (289 tests):**
+
+| Area | What exists |
+|---|---|
+| Front end | indentation-aware lexer with Unicode aliases; parser for everything in §3, including `where`, `...`, `|>`, `~`, models, optimizers and `minimize … over … with` |
+| Types & shapes | `f32`/`i32`; static shapes; compile-time constants by single assignment or `const`; shape polymorphism by unification (a name in a signature is a shape variable unless it is a `const`) |
+| Tensor ops | broadcasting; vector, matrix and batched `@`; zero-copy views (slices with runtime offsets, selects, transposes, reshapes, gathers); axis reductions; tensor literals; method-call syntax |
+| Index notation | LCA binding rule, exact and affine range inference, `where`, `...`, gathers, compile-time bounds proofs, runtime checks |
+| Autodiff | `grad` (with respect to any whole tensor), `minimize` / `maximize` / `over`, `detach`, max/min routing, scatter gradients, mutation-hazard detection |
+| Randomness | counter-based hash RNG; `normal` / `uniform` / `bernoulli`, including tensor arguments (reparameterization); `seed` |
+| Data & control flow | `idx` (gzip), `batches` (with shuffling), `for` / `while` / `if`, `break` / `continue`, SSA with loop-carried write-backs |
+| Prelude (Anvil) | relu, leaky_relu, elu, gelu, silu, softplus, softmax, log_softmax, layer_norm, cross_entropy, mse, bce, bce_with_logits, accuracy, onehot, `Linear`, `sgd` (momentum, weight decay), `adam`, `rmsprop` |
+| Optimizer | DCE including dead state; write-back coalescing; elementwise inlining; vertical/epilogue fusion with store-to-load forwarding and in-register `+=` chains; in-place reuse of dying inputs |
+| Backend | vec-out / vec-red / scalar schedules; R×U register tiling with by-element FMA; LICM; inline NEON exp/log/tanh/sigmoid/sin/cos; linear-scan allocation with spilling; assembly runtime; multithreaded kernels; per-kernel `--profile` |
+| Tooling | `run` / `build` / `asm` / `ir` / `check`, `--interp`, `--seed`, `-O0`; NumPy reference interpreter; VS Code grammar |
+| Added for the Snake RL example | item / slice assignment (`S[ptr] = s`, `x[k] += 1`), written in place when nothing else refers to the buffer; list literals holding run-time values; `randint`; `show(grid, glyphs)` and `sleep`; `\e`, `\x..` and `\u....` escapes; no merged or loop-carried copies for variables never used outside their `if` or loop |
+| Added for the checkers example | `nonzero(mask, size=K)` (an assembly runtime routine); `stack`; `input`; lists of strings indexed at run time in strings, and strings returned by functions; index definitions inside functions shadow outer names; integer `//` and `%` that do not vary along the vector loop no longer prevent vectorizing; the rules are checked against an independent Python implementation on 150 random games |
+| Added to play checkers | `--set NAME=VALUE` to override a `const` from the command line; `save` / `load` checkpoints of a model's parameters (assembly runtime routines; the interpreter reads the same files); `bin/checkers`, which trains once, saves the critic, and from then on starts a game right away |
+| Added later (v0.2 work) | scatter-add in index notation (`counts[labels[i]] += 1`, `E[ids[n], d] += g[n, d]`, with `where` and `-=`), differentiable; `csv()`; temporaries share one static arena when their lifetimes do not overlap (`anvil/backend/arena.py`: 7× less scratch memory for checkers, 13 MB less for the CNN) |
+| Added for the char-RNN | `static for` (unrolled at compile time, so gradients flow through time); an index may add index names to a gathered element (`text[at[b] + t]`, checked as a whole); `bytes()` and `decode()`; `"-" * 72`; the optimizer caches read and write sets, so compiling a 1,252-kernel unrolled program takes 1.5 s instead of 19 s; `examples/charrnn.anvil` |
+| Added after the char-RNN | `Conv2d` and `max_pool2d` in the prelude (im2col), loop collapsing, a size limit on GEMM epilogues: the CNN went from 2.2 to 0.9 s/epoch; gradients of `prod` (exact with zeros); `examples/transformer.anvil`; dead random draws keep the random stream in step |
+| Added next | every independent compile error reported at once (with cascades suppressed); `assert cond, "message"` (compile-time or run time, to stderr, exit status 1); `Conv2d` padding and stride; `LayerNorm` and `Embedding` models; `0 / x` is no longer folded to 0 unless x is a known non-zero constant (it hid nans) |
+| Added last | `anvil repl` (each input re-runs the session on the interpreter and shows only new output); `examples/vae.anvil`; tiled reductions zero their accumulators with `movi` instead of sharing a zero register |
+| CUDA backend | `anvil/backend/cuda.py` + `anvil_cuda.h`: a `__global__` function per kernel (one thread per output element, grid-stride loop, 32-bit index math, `__restrict__` pointers); reductions with few outputs split across up to 1,024 threads per output and combined by a second kernel; `atomicAdd` for scatter-adds; one thread for order-dependent kernels; unified memory, with the host code (control flow, printing, data, checkpoints, `input`) synchronizing before it touches a tensor; bounds faults reported by the host; the same counter-based random numbers. `anvil cuda`, `anvil run --cuda` (nvcc) and `--cuda-emulate` (the same file as C++ on the CPU). `ANVIL_DATA` moves the data files. Tested: every example's output matches the interpreter in emulation, and clang's CUDA front end type-checks each `.cu` for the device and the host. Not yet run on an NVIDIA GPU |
+| Python interop | `anvil.function(source)(arrays)` (`anvil/pyapi.py`): compiled once per argument signature into a shared library whose arguments and results are the caller's arrays, reached through exported pointer slots (`input` / `output` buffers; no copies); Python numbers are compile-time constants; tuples, `grad`, gathers with integer arrays; arguments are never written; calls are serialized by a lock. Softmax 12.7×, layer norm 21×, attention 3.3× faster than NumPy |
+| Experiments and benchmarks | `benchmarks/run.py` (Anvil against NumPy on six kernels, MNIST, compile times, and calls from Python) and `experiments/run.py` (an ablation of fusion and threads, thread scaling, an optimizer × learning-rate grid and a width × depth grid on MNIST, via `--set`); strings compare at compile time (`if OPT == "adam":`); `--set` strips quotes |
+| Fixed by the experiments | compilation was not deterministic: a reduction's index order came from a `set` of names (Python randomizes string hashes per process), so the CNN's convolution was tiled one of three ways from run to run, and the arena's layout depended on set order; both are fixed and tested across `PYTHONHASHSEED`s. In a fused optimizer update the old weights were loaded before the reduction loop (hoisted to the top of the tile), holding 16 of the 32 vector registers, so the kernel fell back to a 4×8 tile; they are now loaded after the loop. An elementwise producer (`relu(z)`) is no longer inlined into a matmul operand that would recompute it once per 16 output columns. Kernels are threaded by weighted work (operations per iteration, gathers counted heavily), not by iteration count, so a 784×128 Adam update and the copy of a shuffled batch now run in parallel. Together: 784-1024-1024-10 MLP 2.23 → 1.98 s/epoch; Adam at width 128 0.150 → 0.100 s/epoch |
+| Editor support | `anvil check --json [--stdin]` (`anvil/ide.py`): diagnostics, and what every name in the file holds (shape and dtype, constant value, index range, a function's signature, a model's parameters), recorded by the elaborator as it runs (`Elaborator.recorder`); a parameter of a function called with different shapes lists them all. The VS Code / Cursor extension (`editors/vscode/extension.js`, no dependencies) checks as you type, underlines errors, shows shapes on hover and after each definition (inlay hints); tested against a stand-in for the editor API in node. Errors inside inlined functions now carry the chain of call sites ("in this call to `forward`"), and the renderer shows labels in other files under their own header, so a shape error in the standard library points at the user's line |
+| Diffusion | `examples/diffusion.anvil`: a DDPM on MNIST with an x0-predicting MLP denoiser (noise-level and digit embeddings, residual blocks with layer norm), classifier-free guidance, the posterior-mean sampler, and quadrant-block drawing; 20 epochs in 44 s. Predicting the noise instead stalled at a loss no better than guessing: 784 numbers of white noise do not fit through 512 hidden units |
+| Row-tiled dot products | the vec_red schedule (a dot product per output, for `a @ bᵀ` shapes) can compute 4 rows at once, sharing the loads that do not depend on the row: the `dz @ Wᵀ` gradient in the wide MLP went from 496 to 293 ms per epoch (1.98 → 1.78 s/epoch); the transformer and char-RNN train ~10% faster |
+| Drawing app | `bin/draw` (`examples/draw/`): a page where you draw a digit; strokes are redrawn MNIST-style (20×20 box, fixed pen width, centered by mass) in Python and read by a CNN (`examples/digits_model.anvil`, trained by `examples/digits.anvil` with random 2-pixel shifts: 99.0% on MNIST) running through `anvil.function`, ~2 ms a reading. `use "file.anvil"` (declarations only, once per file, cycles reported) lets the trainer and the app share the model. Tested on synthetic mouse drawings of every digit (300 of 300 read right) and end to end in a browser |
+| "Better than PyTorch" round | `docs/IDEAS.md` (the brainstorm, with status). `--check` (a runtime routine scans each f32 tensor a kernel writes; the first nan/inf is reported with the tensor, element, source line, the kernel's math, and which inputs already held non-finite values; compiles without fusion); warnings for parameters the objective does not depend on and for `param`s no `minimize` trains; `anvil cost` (FLOPs, memory traffic, runs per line from static shapes and loop counts); `npy`/`save_npy` (all common dtypes; header parsed at compile time); `anvil export` (C library + header; the program's statements run once on the interpreter at export time and what the function reads is baked in as constants: `anvil.function` uses the same lowering); Jupyter `%%anvil`; prelude `dropout`, `warmup_cosine`, `exponential_decay`, label smoothing, `clip_norm` (global gradient-norm clipping in `minimize`); compile-time `if` in model bodies; matrix products (and stacks and sums of them, epilogues split off) through Accelerate's cblas_sgemm on the AMX coprocessor (`anvil/backend/blas.py`: 1024³ matmul 4.4 → 0.95 ms; the wide MLP 2×, CNN 1.4×, transformer 1.3×); the Metal backend (`anvil/backend/metal.py`, `anvil_metal.h`; `anvil_host.h` shared with CUDA): MSL kernels from the CUDA generator, MPS for products, host-side scalars (loop counters and what depends on them only) passed by value so training loops never wait; 3.7–5.2× the CPU on wide MLPs |
+| Fixed | fusing a fill with a later read of the same buffer when a loop in between assigns into it (`value[k] = …`): the read saw the fill, not the loop's writes; autodiff with a buffer written more than once (only the last writer's inputs were followed, and an overwrite did not stop the old value's gradient) |
+
+**Measured (Apple M3 Max):**
+- MNIST MLP: **0.086 s per training epoch** with 8 threads (0.28 s on one core) and 96.9% after
+  5 epochs. NumPy with Accelerate, whose sgemm runs on the AMX coprocessor, takes 0.11 s.
+- Against NumPy (`benchmarks/results.md`): softmax 13×, layer norm 11×, causal attention 2.7×,
+  fused elementwise 2.5×; a 1024³ matmul 0.3× (AMX). From Python through `anvil.function`: up to 21×.
+- The single-core forward GEMM runs at about 90 GFLOP/s, roughly 70% of NEON peak.
+- LeNet-style CNN: 0.9 s/epoch (it was 2.2 s before im2col and loop collapsing) and 97.9% after
+  2 epochs.
+- Character models on the README: the GRU reaches about 1.06 bits per byte in 11 s, and the
+  transformer 1.04 in 10 s (0.8 and 0.6 when the README was 25 KB instead of 38 KB).
+
+**Deviations from the plan:**
+- Shuffled batches are gathered into a contiguous copy once per step. That is cheaper than
+  re-gathering inside every backward kernel.
+- `--profile` (planned for v0.2) and multithreading (planned for v0.3) are already done.
+- AdamW is `adam(weight_decay=…)`.
+
+**Not done yet:**
+- Features: a `bin` loader, gradients with respect to views, higher-order
+  gradients.
+- Planned for later milestones: everything in the v0.3 rows and beyond in §8.
+
+**Next performance steps, in order of expected payoff:**
+1. ~~A parallel batch copy~~ (done: work-weighted threading); a prefetch for gathered rows.
+2. Register tiles that keep a large fused epilogue (Adam) without spilling.
+3. An A-panel vector load with k-unrolling in the GEMM micro-kernel (`dz @ Wᵀ` is done: row-tiled
+   dot products, ~430 GFLOP/s).
+4. On one thread, `-O0` still beats the optimized wide MLP by ~5% (experiments/results.md): find out why.
+5. SME on M4; shared-memory tiles in the CUDA backend.
+
+## 11. MVP build order (as executed)
+
+1. Source spans and diagnostics, lexer, parser (with tests)
+2. Types, kernel IR, elaborator (shapes, views, comprehensions, inlining, models, SSA)
+3. NumPy interpreter, which lets the front end be tested before any backend exists
+4. Autodiff + finite-difference gradient checks
+5. Optimizer passes, checked to be equivalent under the interpreter
+6. AArch64 backend: runtime, scalar codegen, then vectorized schedules, tiling and math functions
+7. CLI, prelude, examples, MNIST, benchmarks
+8. README / language tour, editor grammar, final test pass
