@@ -1,0 +1,47 @@
+# letters.anvil — learn to read handwritten letters and digits (EMNIST: 698,000 characters from
+# about 3,600 writers), and save the network for reading handwritten text (bin/draw, "Text").
+#
+#     bin/anvil run examples/letters.anvil        (data: examples/data/emnist, from NIST)
+#
+# The data: https://biometrics.nist.gov/cs_links/EMNIST/gzip.zip (562 MB); from it, the four
+# emnist-byclass-*-ubyte.gz files go in examples/data/emnist. Training takes about two minutes and
+# reaches 86.9% on EMNIST's test characters: about as well as a network can do on them alone, since
+# o/O/0, l/I/1 and s/S are often drawn exactly alike. The text reader settles those from context.
+#
+# EMNIST stores each image transposed; the training loop turns it the right way round while it
+# moves it by up to 2 pixels in each direction (a different amount every time it is seen).
+
+use "letters_model.anvil"
+
+const EPOCHS = 3
+const BATCH = 128
+const TEST = 20000               # test characters to check after each epoch (of 116,323)
+const SAVE = "letters.weights"
+
+images = idx("data/emnist/emnist-byclass-train-images-idx3-ubyte.gz") / 255
+labels = i32(idx("data/emnist/emnist-byclass-train-labels-idx1-ubyte.gz"))
+test_images = idx("data/emnist/emnist-byclass-test-images-idx3-ubyte.gz") / 255
+test_labels = i32(idx("data/emnist/emnist-byclass-test-labels-idx1-ubyte.gz"))
+X = images.reshape(-1, 1, 28, 28)
+X_test = test_images.reshape(-1, 1, 28, 28)
+
+net = LetterNet()
+
+start = clock()
+for epoch in range(EPOCHS):
+    for x, y in batches(X, labels, size=BATCH, shuffle=true):
+        padded: [BATCH, 1, 32, 32] = 0
+        padded[n, c, i + 2, j + 2] += x[n, c, i, j]
+        dy: i32[BATCH] ~ randint(0, 5)
+        dx: i32[BATCH] ~ randint(0, 5)
+        upright[n, c, i, j] = padded[n, c, dx[n] + j, dy[n] + i] where i < 28, j < 28     # transposed and moved
+        loss = cross_entropy(net(upright, training=true), y)
+        minimize loss with adam(lr=warmup_cosine(epoch, EPOCHS, 1e-3, floor=1e-4))
+    right = 0.0
+    for k in range(TEST // 1000):
+        t[n, c, i, j] = X_test[k * 1000 + n, c, j, i] where n < 1000, i < 28, j < 28
+        right = right + accuracy(net(t), test_labels[k * 1000 : k * 1000 + 1000])
+    print("epoch {epoch + 1}   loss {loss:.4f}   test accuracy {right / (TEST // 1000):.2%}   ({clock() - start:.0f}s)")
+
+save(net, SAVE)
+print("saved the network to {SAVE}")

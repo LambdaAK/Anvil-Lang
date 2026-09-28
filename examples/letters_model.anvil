@@ -1,0 +1,13 @@
+# letters_model.anvil — the network that reads handwritten characters: the 62 classes of EMNIST
+# (0-9, A-Z, a-z). examples/letters.anvil trains it; examples/draw (bin/draw, "Text") uses it.
+
+const CLASSES = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+model LetterNet:
+    c1 = Conv2d(1, 32, 5)            # 28×28 -> 24×24, pooled to 12×12
+    c2 = Conv2d(32, 64, 5)           # 12×12 ->  8×8,  pooled to 4×4
+    fc1 = Linear(64 * 4 * 4, 256)
+    fc2 = Linear(256, 62)
+    fn forward(x, training = false):
+        h = x |> c1 |> relu |> max_pool2d |> c2 |> relu |> max_pool2d |> flatten(1)
+        return h |> fc1 |> relu |> dropout(0.3, training) |> fc2
