@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Write words</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --line: #262a33;
+    --rule: #1d212a;
+    --text: #e8eaef;
+    --muted: #8b93a3;
+    --accent: #7cc4ff;
+    --accent-dim: #2b4a63;
+    --fixed: #ffd27c;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 32px 16px 48px; }
+  header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 22px; font-weight: 650; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .modes { display: flex; gap: 4px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 9px; padding: 3px; }
+  .modes a { color: var(--muted); text-decoration: none; padding: 4px 12px; border-radius: 6px; font-size: 14px; }
+  .modes a.on { background: var(--line); color: var(--text); }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .sub code { color: var(--text); font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  .pad { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  .canvas-wrap { position: relative; width: 100%; height: 360px; }
+  @media (max-width: 600px) { .canvas-wrap { height: 300px; } }
+  #pad { width: 100%; height: 100%; display: block; border-radius: 10px; background: #000;
+    touch-action: none; cursor: crosshair; }
+  .hint { position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+    color: #4a5160; font-size: 16px; pointer-events: none; transition: opacity .2s; padding: 0 24px; }
+  .hint.hidden { opacity: 0; }
+  .tools { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  button { background: transparent; color: var(--text); border: 1px solid var(--line);
+    border-radius: 9px; padding: 8px 14px; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.on { border-color: var(--accent-dim); color: var(--accent); }
+  .spacer { flex: 1; }
+  kbd { font: 11px ui-monospace, Menlo, monospace; color: var(--muted); border: 1px solid var(--line);
+    border-radius: 4px; padding: 0 4px; margin-left: 6px; }
+
+  .result { background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 18px 20px; margin-top: 16px; }
+  .reading { font-size: 34px; font-weight: 600; line-height: 1.25; min-height: 43px;
+    white-space: pre-wrap; word-break: break-word; letter-spacing: -0.01em; }
+  .reading.none { color: #3a404c; }
+  .meta { color: var(--muted); font-size: 13px; margin-top: 6px; }
+  .error { color: #ff8f8f; }
+  .words { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 16px; padding-top: 16px;
+    border-top: 1px solid var(--line); }
+  .words:empty { display: none; }
+  .word { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px 8px; }
+  .word .as { font-size: 13px; color: var(--muted); margin-bottom: 8px; }
+  .word .as b { color: var(--text); font-weight: 650; font-size: 15px; }
+  .word .as .raw { font: 12px ui-monospace, Menlo, monospace; }
+  .word .as .fix { color: var(--fixed); }
+  .chars { display: flex; gap: 6px; }
+  .ch { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 46px; }
+  .ch canvas { width: 42px; height: 42px; image-rendering: pixelated; border-radius: 5px;
+    background: #000; border: 1px solid var(--line); }
+  .ch .t { font-weight: 650; font-size: 15px; line-height: 1; }
+  .ch .alt { color: var(--muted); font: 10px ui-monospace, Menlo, monospace; white-space: nowrap; }
+  .how { color: var(--muted); font-size: 13px; margin-top: 16px; }
+  .how summary { cursor: pointer; }
+  .how p { margin: 8px 0 0; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Write in English</h1>
+    <nav class="modes"><a href="/">Digits</a><a href="/text" class="on">Text</a></nav>
+  </header>
+  <p class="sub">A network written in Anvil (<code>examples/letters_model.anvil</code>, trained on EMNIST's
+    814,255 handwritten characters) reads each letter; the words around it settle what it can't.</p>
+  <div class="pad">
+    <div class="canvas-wrap">
+      <canvas id="pad"></canvas>
+      <div class="hint" id="hint">write a few words here: print the letters, a little apart<br>
+        capitals up to the line above, small letters up to the dashed line</div>
+    </div>
+    <div class="tools">
+      <button id="undo">Undo<kbd>Z</kbd></button>
+      <button id="clear">Clear<kbd>C</kbd></button>
+      <span class="spacer"></span>
+      <button id="boxes" class="on">Letter boxes</button>
+      <button id="rules" class="on">Lines</button>
+    </div>
+  </div>
+  <div class="result">
+    <div class="reading none" id="reading">…</div>
+    <div class="meta" id="meta">write something to see what the network reads</div>
+    <div class="words" id="words"></div>
+    <details class="how">
+      <summary>How it reads</summary>
+      <p>Your strokes are grouped into lines, words and letters: strokes that overlap from left to right
+        make one letter (the dot of an i, the bar of a t); strokes that only touch might be one letter or
+        two, and both are tried. Each letter is drawn again the way EMNIST's are (28×28, scaled to fill the
+        frame) and the network gives a probability for each of 0–9, A–Z and a–z.</p>
+      <p>The network alone confuses l/1/I, o/0/O and s/5/S, and can't tell c from C. So each word is
+        matched against a word list using those probabilities (a <span style="color: var(--fixed)">yellow</span>
+        reading below is one the word list corrected); a word that isn't in the list is kept as read, and a
+        number as a number. Case comes from each letter's shape and its size on the line.</p>
+    </details>
+  </div>
+</main>
+<script>
+"use strict";
+const pad = document.getElementById("pad");
+const ctx = pad.getContext("2d");
+let strokes = [];          // lists of [x, y], in CSS pixels
+let drawing = null;
+let pending = false, inflight = false;
+let result = null;         // the last reading, for the letter boxes
+let showBoxes = true, showRules = true;
+const RULE = 104;          // the ruled lines: one line of writing every RULE pixels
+
+function resize() {
+  const r = pad.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  pad.width = Math.round(r.width * dpr);
+  pad.height = Math.round(r.height * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  redraw();
+}
+
+function redraw() {
+  const w = pad.clientWidth, h = pad.clientHeight;
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, w, h);
+  if (showRules) {                                  // baselines, and dashed lines at the height of small letters
+    ctx.lineWidth = 1;
+    for (let y = RULE * 0.85; y < h; y += RULE) {
+      ctx.strokeStyle = "#1d212a";
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(12, y + 0.5); ctx.lineTo(w - 12, y + 0.5); ctx.stroke();
+      ctx.strokeStyle = "#171a21";
+      ctx.setLineDash([6, 6]);
+      ctx.beginPath(); ctx.moveTo(12, y - RULE * 0.3 + 0.5); ctx.lineTo(w - 12, y - RULE * 0.3 + 0.5); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+  if (showBoxes && result && result.lines) {
+    ctx.font = "600 13px -apple-system, BlinkMacSystemFont, sans-serif";
+    ctx.textAlign = "center";
+    for (const line of result.lines) for (const word of line) for (const c of word.chars) {
+      const [x0, y0, x1, y1] = c.box, m = 5;
+      ctx.strokeStyle = "#2b4a63";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(x0 - m, y0 - m, x1 - x0 + 2 * m, y1 - y0 + 2 * m, 5);
+      ctx.stroke();
+      ctx.fillStyle = "#7cc4ff";
+      ctx.fillText(c.text, (x0 + x1) / 2, y0 - m - 4);
+    }
+  }
+  ctx.strokeStyle = "#ffffff";
+  ctx.lineWidth = 5;
+  ctx.lineCap = ctx.lineJoin = "round";
+  for (const s of strokes) {
+    ctx.beginPath();
+    ctx.moveTo(s[0][0], s[0][1]);
+    if (s.length === 1) ctx.lineTo(s[0][0] + 0.01, s[0][1]);
+    for (const [x, y] of s.slice(1)) ctx.lineTo(x, y);
+    ctx.stroke();
+  }
+  document.getElementById("hint").classList.toggle("hidden", strokes.length > 0);
+}
+
+function point(e) {
+  const r = pad.getBoundingClientRect();
+  return [+(e.clientX - r.left).toFixed(1), +(e.clientY - r.top).toFixed(1)];
+}
+
+pad.addEventListener("pointerdown", (e) => {
+  pad.setPointerCapture(e.pointerId);
+  drawing = [point(e)];
+  strokes.push(drawing);
+  result = null;                                   // the boxes are stale until the next reading
+  redraw();
+});
+pad.addEventListener("pointermove", (e) => {
+  if (!drawing) return;
+  const events = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+  for (const ev of events) drawing.push(point(ev));
+  redraw();
+});
+const end = () => { if (drawing) { drawing = null; ask(); } };
+pad.addEventListener("pointerup", end);
+pad.addEventListener("pointercancel", end);
+
+function clearAll() { strokes = []; result = null; redraw(); show(null); }
+function undo() { strokes.pop(); result = null; redraw(); strokes.length ? ask() : show(null); }
+document.getElementById("clear").onclick = clearAll;
+document.getElementById("undo").onclick = undo;
+document.getElementById("boxes").onclick = (e) => { showBoxes = !showBoxes; e.currentTarget.classList.toggle("on", showBoxes); redraw(); };
+document.getElementById("rules").onclick = (e) => { showRules = !showRules; e.currentTarget.classList.toggle("on", showRules); redraw(); };
+window.addEventListener("keydown", (e) => {
+  if (e.key === "c" || e.key === "Escape") clearAll();
+  if (e.key === "z" || ((e.metaKey || e.ctrlKey) && e.key === "z")) { e.preventDefault(); undo(); }
+});
+
+// read when a stroke ends; at most one request in flight, and the latest drawing wins
+async function ask() {
+  if (inflight) { pending = true; return; }
+  if (!strokes.length) return;
+  inflight = true;
+  const sent = strokes.length;
+  try {
+    const res = await fetch("/read_text", { method: "POST", headers: { "Content-Type": "application/json" },
+                                            body: JSON.stringify({ strokes }) });
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    if (strokes.length === sent && !drawing) { result = data; redraw(); }
+    if (strokes.length) show(data);
+  } catch (err) {
+    document.getElementById("meta").innerHTML = `<span class="error">no answer: ${esc(err.message)}</span> (is bin/draw still running?)`;
+  } finally {
+    inflight = false;
+    if (pending) { pending = false; ask(); }
+  }
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]); }
+function pct(p) { return p >= 0.995 ? "99%" : `${Math.round(p * 100)}%`; }
+
+function show(data) {
+  const reading = document.getElementById("reading"), meta = document.getElementById("meta");
+  const words = document.getElementById("words");
+  words.innerHTML = "";
+  if (!data || data.empty) {
+    reading.textContent = "…";
+    reading.classList.add("none");
+    meta.textContent = "write something to see what the network reads";
+    return;
+  }
+  if (data.missing) {
+    reading.textContent = "…";
+    reading.classList.add("none");
+    meta.innerHTML = `<span class="error">The letter network isn't trained yet:</span> ${esc(data.missing)}.`;
+    return;
+  }
+  reading.textContent = data.text || "…";
+  reading.classList.toggle("none", !data.text);
+  let nw = 0, nc = 0, fixed = 0;
+  for (const line of data.lines) for (const w of line) {
+    nw++; nc += w.chars.length;
+    const corrected = w.raw !== w.text && w.raw.toLowerCase() !== w.text.replace(/'/g, "").toLowerCase();
+    if (corrected) fixed++;
+    const el = document.createElement("div");
+    el.className = "word";
+    el.innerHTML = `<div class="as"><b>${esc(w.text + w.marks)}</b>` +
+      (corrected ? ` <span class="fix">← the network read <span class="raw">${esc(w.raw)}</span></span>` : "") + `</div>`;
+    const row = document.createElement("div");
+    row.className = "chars";
+    for (const c of w.chars) {
+      const ch = document.createElement("div");
+      ch.className = "ch";
+      ch.title = c.top.map(([k, p]) => `${k} ${pct(p)}`).join("   ");
+      const cv = document.createElement("canvas");
+      cv.width = cv.height = 28;
+      const g = cv.getContext("2d"), img = g.createImageData(28, 28);
+      c.image.forEach((v, i) => { const x = Math.round(v * 255); img.data.set([x, x, x, 255], i * 4); });
+      g.putImageData(img, 0, 0);
+      const [k, p] = c.top[0];
+      ch.append(cv);
+      ch.insertAdjacentHTML("beforeend", `<span class="t">${esc(c.text)}</span><span class="alt">${esc(k)} ${pct(p)}</span>`);
+      row.append(ch);
+    }
+    el.append(row);
+    words.append(el);
+  }
+  meta.textContent = `${nw} word${nw === 1 ? "" : "s"}, ${nc} letter${nc === 1 ? "" : "s"}` +
+    (fixed ? `, ${fixed} corrected by the word list` : "") + ` · read in ${data.ms} ms`;
+}
+
+window.addEventListener("resize", resize);
+resize();
+</script>
+</body>
+</html>
