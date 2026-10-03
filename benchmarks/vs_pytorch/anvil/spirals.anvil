@@ -1,0 +1,30 @@
+# Two interleaved spirals, a 2-64-64-2 tanh network, Adam: 4,000 steps of almost no arithmetic,
+# so the time is nearly all the cost of a training step itself. (torch/spirals.py is the same.)
+
+const EPOCHS = 200
+const CHUNK = 20             # epochs per timed chunk
+
+n = 1000
+turns = 1.5
+t = linspace(0.3, 2 * pi * turns, n)
+noise: [2, n, 2] ~ normal(0, 0.03)
+points[c, i, d] = t[i] / (2 * pi * turns) * (cos(t[i] + c * pi) if d == 0 else sin(t[i] + c * pi)) + noise[c, i, d] where c < 2, d < 2
+X = points.reshape(2 * n, 2)
+labels[k] = i32(k >= n) where k < 2000
+
+model Net:
+    l1 = Linear(2, 64)
+    l2 = Linear(64, 64)
+    l3 = Linear(64, 2)
+    fn forward(x) = x |> l1 |> tanh |> l2 |> tanh |> l3
+
+net = Net()
+
+for chunk in range(EPOCHS // CHUNK):
+    t0 = clock()
+    for epoch in range(CHUNK):
+        for xb, yb in batches(X, labels, size=100, shuffle=true):
+            loss = cross_entropy(net(xb), yb)
+            minimize loss with adam(lr=0.01)
+    print("@epoch {clock() - t0:.5f}")
+print("@metric {accuracy(net(X), labels):.4f}")

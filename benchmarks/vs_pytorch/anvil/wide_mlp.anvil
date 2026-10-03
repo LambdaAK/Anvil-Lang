@@ -1,0 +1,28 @@
+# A wide perceptron on MNIST (784-1024-1024-10), Adam: big matrix products, 1.86M parameters.
+# (torch/wide_mlp.py is the same in PyTorch.)
+
+const EPOCHS = 2
+const BATCH = 128
+
+images = idx("../../../examples/data/train-images-idx3-ubyte.gz") / 255
+labels: i32[60000] = idx("../../../examples/data/train-labels-idx1-ubyte.gz")
+test_images = idx("../../../examples/data/t10k-images-idx3-ubyte.gz") / 255
+test_labels: i32[10000] = idx("../../../examples/data/t10k-labels-idx1-ubyte.gz")
+X = images.reshape(60000, 784)
+X_test = test_images.reshape(10000, 784)
+
+model WideMLP:
+    l1 = Linear(784, 1024)
+    l2 = Linear(1024, 1024)
+    l3 = Linear(1024, 10)
+    fn forward(x) = x |> l1 |> relu |> l2 |> relu |> l3
+
+net = WideMLP()
+
+for epoch in range(EPOCHS):
+    t0 = clock()
+    for x, y in batches(X, labels, size=BATCH, shuffle=true):
+        loss = cross_entropy(net(x), y)
+        minimize loss with adam(lr=1e-3)
+    print("@epoch {clock() - t0:.5f}")
+print("@metric {accuracy(net(X_test), test_labels):.4f}")

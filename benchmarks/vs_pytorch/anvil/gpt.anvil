@@ -1,0 +1,57 @@
+# A small GPT on a copy of the README: 2 blocks, 4 heads, width 64, context 64, Adam. The metric is
+# bits per byte over the last 100 steps. (torch/gpt.py is the same in PyTorch.)
+
+const STEPS = 1000
+const CHUNK = 100
+const BATCH = 16
+const T = 64
+const D = 64
+const HEADS = 4
+const DH = D // HEADS
+
+text = bytes("../data/readme.txt")
+n = len(text)
+
+model Block:
+    param Wq: [D, D] ~ normal(0, sqrt(1 / D))
+    param Wk: [D, D] ~ normal(0, sqrt(1 / D))
+    param Wv: [D, D] ~ normal(0, sqrt(1 / D))
+    param Wo: [D, D] ~ normal(0, sqrt(0.5 / D))
+    up = Linear(D, 4 * D)
+    down = Linear(4 * D, D)
+    fn forward(x):
+        h = layer_norm(x)
+        q = (h @ Wq).reshape(-1, T, HEADS, DH)
+        k = (h @ Wk).reshape(-1, T, HEADS, DH)
+        v = (h @ Wv).reshape(-1, T, HEADS, DH)
+        s[b, a, i, j] = sum q[b, i, a, e] * k[b, j, a, e] / sqrt(DH) + (0.0 if j <= i else -1e9)
+        p = softmax(s)
+        o[b, i, a, e] = sum p[b, a, i, j] * v[b, j, a, e]
+        x = x + o.reshape(-1, T, D) @ Wo
+        return x + (layer_norm(x) |> up |> gelu |> down)
+
+model GPT:
+    param E: [256, D] ~ normal(0, 0.5)
+    param P: [T, D] ~ normal(0, 0.1)
+    b1 = Block()
+    b2 = Block()
+    out = Linear(D, 256)
+    fn forward(codes):
+        e[b, t, d] = E[codes[b, t], d] + P[t, d]
+        return e |> b1 |> b2 |> layer_norm |> out
+
+net = GPT()
+
+total = 0.0
+for chunk in range(STEPS // CHUNK):
+    t0 = clock()
+    total = 0.0
+    for step in range(CHUNK):
+        at: i32[BATCH] ~ randint(0, n - T - 1)
+        x[b, t] = text[at[b] + t] where t < T + 1
+        logits = net(x[:, 0:T])
+        loss = cross_entropy(logits.reshape(BATCH * T, 256), x[:, 1:T + 1].reshape(BATCH * T))
+        minimize loss over net with adam(lr=2e-3)
+        total = total + loss
+    print("@epoch {clock() - t0:.5f}")
+print("@metric {total / CHUNK / log(2.0):.4f}")

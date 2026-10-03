@@ -1,0 +1,50 @@
+# A GRU language model on a copy of the README: backpropagation through 32 unrolled steps, Adam.
+# Many small operations per step. The metric is bits per byte over the last 100 steps.
+# (torch/charrnn.py is the same in PyTorch, with nn.GRU.)
+
+const STEPS = 1000
+const CHUNK = 100            # steps per timed chunk
+const BATCH = 32
+const SEQ = 32
+const EMBED = 32
+const HIDDEN = 128
+
+text = bytes("../data/readme.txt")
+n = len(text)
+
+model GRU(n_in, n_hid):
+    xz = Linear(n_in, n_hid)
+    hz = Linear(n_hid, n_hid)
+    xr = Linear(n_in, n_hid)
+    hr = Linear(n_hid, n_hid)
+    xc = Linear(n_in, n_hid)
+    hc = Linear(n_hid, n_hid)
+    fn forward(x, h):
+        z = sigmoid(xz(x) + hz(h))
+        r = sigmoid(xr(x) + hr(h))
+        c = tanh(xc(x) + hc(r * h))
+        return (1 - z) * h + z * c
+
+model CharRNN:
+    param E: [256, EMBED] ~ normal(0, 1)
+    gru = GRU(EMBED, HIDDEN)
+    out = Linear(HIDDEN, 256)
+
+net = CharRNN()
+
+total = 0.0
+for chunk in range(STEPS // CHUNK):
+    t0 = clock()
+    total = 0.0
+    for step in range(CHUNK):
+        at: i32[BATCH] ~ randint(0, n - SEQ - 1)
+        x[b, t] = text[at[b] + t] where t < SEQ + 1
+        h = zeros(BATCH, HIDDEN)
+        loss = 0.0
+        static for t in range(SEQ):
+            h = net.gru(net.E[x[:, t]], h)
+            loss = loss + cross_entropy(net.out(h), x[:, t + 1])
+        minimize loss / SEQ over net with adam(lr=3e-3)
+        total = total + loss / SEQ
+    print("@epoch {clock() - t0:.5f}")
+print("@metric {total / CHUNK / log(2.0):.4f}")

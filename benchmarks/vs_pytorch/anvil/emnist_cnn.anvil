@@ -1,0 +1,27 @@
+# The letter network of bin/draw --text (conv 32, conv 64, linear 256, dropout, 62 classes) on
+# 120,000 EMNIST characters, Adam: the heaviest convolutions here. (torch/emnist_cnn.py is the same
+# in PyTorch.) The data: python3 benchmarks/vs_pytorch/prepare.py
+
+use "../../../examples/letters_model.anvil"
+
+const EPOCHS = 1
+const BATCH = 128
+
+X = (f32(npy("../data/emnist_train_x.npy")) / 255).reshape(-1, 1, 28, 28)
+labels = npy("../data/emnist_train_y.npy")
+X_test = (f32(npy("../data/emnist_test_x.npy")) / 255).reshape(-1, 1, 28, 28)
+test_labels = npy("../data/emnist_test_y.npy")
+
+net = LetterNet()
+
+for epoch in range(EPOCHS):
+    t0 = clock()
+    for x, y in batches(X, labels, size=BATCH, shuffle=true):
+        loss = cross_entropy(net(x, training=true), y)
+        minimize loss with adam(lr=1e-3)
+    print("@epoch {clock() - t0:.5f}")
+right = 0.0
+for k in range(10):
+    t[n, c, i, j] = X_test[k * 1000 + n, c, i, j] where n < 1000
+    right = right + accuracy(net(t), test_labels[k * 1000 : k * 1000 + 1000])
+print("@metric {right / 10:.4f}")

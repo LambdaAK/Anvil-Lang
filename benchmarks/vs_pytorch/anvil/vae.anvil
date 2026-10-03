@@ -1,0 +1,36 @@
+# A variational autoencoder on MNIST (784-256-16-256-784), Adam. The metric is the last epoch's
+# mean loss per image (reconstruction + KL). (torch/vae.py is the same in PyTorch.)
+
+const EPOCHS = 3
+const BATCH = 100
+const Z = 16
+
+images = idx("../../../examples/data/train-images-idx3-ubyte.gz") / 255
+X = images.reshape(60000, 784)
+
+model VAE:
+    enc = Linear(784, 256)
+    mu = Linear(256, Z)
+    logvar = Linear(256, Z)
+    dec1 = Linear(Z, 256)
+    dec2 = Linear(256, 784)
+    fn decode(z) = z |> dec1 |> relu |> dec2 |> sigmoid
+
+vae = VAE()
+
+total = 0.0
+for epoch in range(EPOCHS):
+    t0 = clock()
+    total = 0.0
+    for x in batches(X, size=BATCH, shuffle=true):
+        h = relu(vae.enc(x))
+        mu = vae.mu(h)
+        logvar = vae.logvar(h)
+        z: [BATCH, Z] ~ normal(mu, exp(0.5 * logvar))
+        recon = bce(vae.decode(z), x) * 784
+        kl = -0.5 * mean(sum(1 + logvar - mu * mu - exp(logvar), axis=1))
+        loss = recon + kl
+        minimize loss over vae with adam(lr=1e-3)
+        total = total + loss
+    print("@epoch {clock() - t0:.5f}")
+print("@metric {total / (60000 // BATCH):.4f}")

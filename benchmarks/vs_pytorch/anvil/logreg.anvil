@@ -1,0 +1,22 @@
+# Softmax regression on MNIST: one 784×10 linear layer, SGD. (torch/logreg.py is the same in PyTorch.)
+# Tiny compute per step: the time is mostly the cost of running a step at all.
+
+const EPOCHS = 5
+const BATCH = 100
+
+images = idx("../../../examples/data/train-images-idx3-ubyte.gz") / 255
+labels: i32[60000] = idx("../../../examples/data/train-labels-idx1-ubyte.gz")
+test_images = idx("../../../examples/data/t10k-images-idx3-ubyte.gz") / 255
+test_labels: i32[10000] = idx("../../../examples/data/t10k-labels-idx1-ubyte.gz")
+X = images.reshape(60000, 784)
+X_test = test_images.reshape(10000, 784)
+
+net = Linear(784, 10)
+
+for epoch in range(EPOCHS):
+    t0 = clock()
+    for x, y in batches(X, labels, size=BATCH, shuffle=true):
+        loss = cross_entropy(net(x), y)
+        minimize loss with sgd(lr=0.2)
+    print("@epoch {clock() - t0:.5f}")
+print("@metric {accuracy(net(X_test), test_labels):.4f}")
