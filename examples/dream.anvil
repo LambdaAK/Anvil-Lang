@@ -1,0 +1,94 @@
+# dream.anvil — what does a digit network see, and how easily is it fooled?
+#
+#     bin/anvil run examples/dream.anvil        (uses digits.weights, which bin/draw trains)
+#
+# Anvil differentiates anything, the input image included. So the network that reads your drawings
+# in bin/draw can be asked two questions, each a few lines here:
+#   1. Dreams. Start from a black image and change its pixels, step by step, until the network is
+#      sure it shows a 0 (and a 1, ... a 9). What comes out is what the network thinks a digit is.
+#   2. Fooling it. Take real handwritten digits and change each pixel by a little (at most EPS) until
+#      the network reads every one as a different digit: the next one up.
+
+use "digits_model.anvil"
+
+const DREAM_STEPS = 600
+const FOOL_STEPS = 60
+const EPS = 0.2              # how much a pixel may change when fooling the network (pixels are 0–1)
+const INK = 30.0             # how much ink costs the dreams
+
+net = DigitNet()
+found = load(net, "digits.weights")
+assert found == 1, "no digits.weights: run bin/draw once to train the network"
+
+# draw images [2, 5, 28, 28] as text: the middle 20×20 pixels of each, two pixel rows per line
+fn picture(imgs):
+    canvas: [22, 115] = 0
+    canvas[a * 11 + r, b * 23 + c] += (imgs[a, b, 4 + 2 * r, 4 + c] + imgs[a, b, 5 + 2 * r, 4 + c]) / 2 where r < 10, c < 20
+    show(i32(9.99 * min(canvas, 1)), " .:-=+*#%@")
+
+# ------------------------------------------------------------------ 1. dreams
+# An image is drawn at half resolution (14×14, so its strokes are smooth), scaled up, softened with
+# a 3×3 blur, and kept between 0 and 1 by a sigmoid. It starts as gray noise.
+param z: [10, 1, 14, 14] ~ normal(0, 0.3)
+
+fn render(z):
+    up: [10, 1, 30, 30] = 0
+    up[n, c, 2 * i + a + 1, 2 * j + b + 1] += z[n, c, i, j] where a < 2, b < 2
+    soft[n, c, i, j] = sum up[n, c, i + u, j + v] / 9 where u < 3, v < 3
+    return sigmoid(soft)
+
+# ink costs more the farther it is from the middle, where MNIST's digits are
+far[i, j] = 0.3 + ((i - 13.5) ** 2 + (j - 13.5) ** 2) / 100 where i < 28, j < 28
+
+for step in range(DREAM_STEPS):
+    img = render(z)
+    # move each image by up to 3 pixels at random first, so a dream must work wherever it sits
+    pad: [10, 1, 34, 34] = 0
+    pad[n, c, i + 3, j + 3] += img[n, c, i, j]
+    dy: i32[10] ~ randint(0, 7)
+    dx: i32[10] ~ randint(0, 7)
+    moved[n, c, i, j] = pad[n, c, dy[n] + i, dx[n] + j] where i < 28, j < 28
+    scores = net(moved)
+    # image d: its score for d, above its average score for the other digits (this keeps rising
+    # where the probability would stop at 99.9%), with as little ink as will do: ink costs more
+    # and more as the dream goes on, so the strokes form first and the rest fades
+    margin[d] = scores[d, d] - (sum(scores[d, k]) - scores[d, d]) / 9
+    loss = -mean(margin) + INK * step / DREAM_STEPS * mean(img * far)
+    minimize loss over z with adam(lr=0.05)
+
+dreams = render(z)
+p = softmax(net(dreams))
+print("\n1. The network's dreams: images it is sure are 0, 1, ... 9 (made from nothing)\n")
+picture(dreams.reshape(2, 5, 28, 28))
+print("   sure it is:  ", end="")
+for d in range(10):
+    print("{d}: {p[d, d] * 100:.1f}%   ", end="")
+print("")
+
+# ------------------------------------------------------------------ 2. fooling it
+test_images = idx("data/t10k-images-idx3-ubyte.gz") / 255
+test_labels: i32[10000] = idx("data/t10k-labels-idx1-ubyte.gz")
+real = test_images[0:10].reshape(10, 1, 28, 28)
+label = test_labels[0:10]
+goal = (label + 1) % 10                                         # make each digit read as the next one
+x = real
+for step in range(FOOL_STEPS):
+    loss = cross_entropy(net(x), goal)
+    g = grad(loss, x)                                           # how each pixel moves the loss
+    x = max(min(x - 0.01 * sign(g), real + EPS), real - EPS)    # a small step, at most EPS from the real one
+    x = max(min(x, 1), 0)
+
+before = softmax(net(real))
+after = softmax(net(x))
+print("\n2. Fooling it. Ten real handwritten digits from MNIST's test set...\n")
+picture(real.reshape(2, 5, 28, 28))
+print("   it reads:    ", end="")
+for k in range(10):
+    print("{argmax(before[k])} ({before[k, argmax(before[k])] * 100:.0f}%)   ", end="")
+print("\n\n...and the same digits, each pixel changed by at most {EPS}:\n")
+picture(x.reshape(2, 5, 28, 28))
+print("   it reads:    ", end="")
+for k in range(10):
+    print("{argmax(after[k])} ({after[k, argmax(after[k])] * 100:.0f}%)   ", end="")
+fooled = mean(f32(argmax(after) == goal))
+print("\n\n   {fooled * 100:.0f}% now read as the digit after the real one; the average pixel moved by {mean(abs(x - real)):.3f}")
