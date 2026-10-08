@@ -56,8 +56,11 @@ almost twice as long.
 - **Index notation is the core of the language.** `y[i] = sum W[i, j] * x[j]` is valid Anvil.
   Indices on the left are outputs, and every other index is reduced. A convolution is one line,
   and its output size is inferred.
-- **Shapes are types.** Every shape is known at compile time, and shape errors point at the exact
-  operand.
+- **Shapes are types, with names.** Every shape is known at compile time, and every dimension
+  remembers what it is: hovering shows `f32[BATCH, T, HEADS, DH] = [16, 64, 4, 16]`, and a call
+  shows `forward(x: f32[BATCH, T, D]) -> f32[BATCH, T, 4*D]`. Two dimensions that must agree must
+  be the same dimension, so swapping `T` and `D` is a compile error even when both are 64
+  ([below](#named-dimensions)). Shape errors point at the exact operand.
 - **Differentiation is built in.** `grad(loss, W)` and `minimize loss with adam()` generate the
   backward pass *at compile time*, so it gets fused and vectorized like everything else.
   The SGD update ends up inside the weight-gradient matrix multiply, and the gradient is never
@@ -216,6 +219,50 @@ Element types are `f32` (the default) and `i32`. Comparisons give `f32` masks, s
 `mean(pred == y)` is accuracy. Slices, transposes (`x.T`), reshapes and integer-tensor gathers
 (`table[ids]`) are zero-copy views.
 
+### Named dimensions
+
+Every integer `const` names a dimension, and shapes keep the names through everything the program
+does with them: arithmetic, reshapes, slices, flattening, index notation, layers. Hovering over any
+name shows them, and the numbers they stand for:
+
+```python
+const BATCH = 16
+const T = 64
+const D = 64
+const HEADS = 4
+const DH = D // HEADS                      # hover: 16 = D/HEADS
+
+q = (h @ Wq).reshape(-1, T, HEADS, DH)     # hover: f32[BATCH, T, HEADS, DH] = [16, 64, 4, 16]
+s[b, a, i, j] = sum q[b, i, a, e] * k[b, j, a, e]      # f32[BATCH, HEADS, T, T]; i < T (64)
+y = l(x)                                   # hover on l: forward(x: f32[BATCH, T, D]) -> f32[BATCH, T, 4*D]
+```
+
+Two dimensions that have to agree (an index used on two tensors, the two sides of `+`, the inner
+dimensions of `@`, a function's signature, an annotation, a variable across loop iterations) have to
+be **the same dimension, not just the same number**. Here `T` and `D` are both 64, so a swapped
+`P[d, t]` would compute something and train silently worse; it would fail as soon as either size
+changed. A program that would fail with other sizes does not compile with these:
+
+```
+error: index `t` ranges over `T` in one place but `D` in another
+48│         e[b, t, d] = E[codes[b, t], d] + P[d, t]
+  │                        ─────────── `x[b, t]` dimension 1: size T
+  │                                          ━━━━━━━ `net.P[d, t]` dimension 1: size D
+  = note: `T` and `D` are both 64 here, but they are different dimensions: the program would fail with other sizes
+  = help: if they are meant to be the same size, define one from the other (e.g. `const D = T`)
+```
+
+A size written as a number, or read from a data file, has no name and matches any dimension of that
+size; an annotation can give it one (`images: [N, 28, 28] = idx(...)`). `anvil shapes file.anvil`
+prints the whole program this way: its named dimensions, then every tensor it defines, line by line.
+The names exist only at compile time: the generated code is the same with or without them.
+
+[`examples/named_dims.anvil`](examples/named_dims.anvil) reads MNIST digits row by row with
+attention. Its sizes collide the way real ones do (square images, a model as wide as the batch), and
+it carries three one-line bugs behind `--set BUG=1` (2, 3): reading columns as rows, weights on the
+wrong side of `@`, and an index typo. With unnamed sizes each one compiles and trains (two of them to
+90% instead of 93%, by mixing the examples of a batch); with names, none of them compiles.
+
 ### Index notation
 
 ```python
@@ -370,9 +417,12 @@ error: index `j` ranges over 784 in one place but 128 in another
 ```
 
 There are more in [`examples/errors/`](examples/errors/): broadcasting, `@`, unbound indices,
-out-of-bounds windows, a non-scalar loss, and typos (which get "did you mean `softmax`?"). The
-compiler reports every independent error in a file, up to 20, not just the first. A name whose
-definition failed is not reported again where it is used.
+out-of-bounds windows, a non-scalar loss, and typos (which get "did you mean `softmax`?"). Two more
+kinds are about meaning rather than size: dimensions of equal size with different names
+([Named dimensions](#named-dimensions)), and a gradient that would have to pass through a run-time
+`for` loop or `if` (Anvil differentiates through `static for` and compile-time conditions; the error
+says how to rewrite it). The compiler reports every independent error in a file, up to 20, not just
+the first. A name whose definition failed is not reported again where it is used.
 
 ## Finding bugs and costs
 
@@ -553,6 +603,7 @@ one-thread-per-output kernels do not use shared memory yet.
 | `anvil run --cuda file.anvil` | build with `nvcc` and run (`--cuda-emulate`: as C++ on the CPU) |
 | `anvil ir file.anvil` | the optimized kernel IR, in math notation |
 | `anvil check file.anvil` | type- and shape-check only (`--json`: errors and every name's shape, for editors) |
+| `anvil shapes file.anvil` | the program's named dimensions, then every tensor it defines with its shape, line by line |
 | `anvil repl` | try Anvil a line at a time (on the reference interpreter) |
 | `ANVIL_THREADS=n` | worker threads (default: performance cores, at most 8) |
 | `ANVIL_BLAS=0` | matrix products in Anvil's own kernels instead of Accelerate (the AMX coprocessor) |
@@ -605,6 +656,8 @@ generating code: about 50 ms for MNIST.
 | [`letters.anvil`](examples/letters.anvil) | a CNN for handwritten letters and digits (EMNIST's 62 classes, 698,000 images), saved for `bin/draw --text` | 86.9% after 3 epochs (2 min) |
 | [`diffusion.anvil`](examples/diffusion.anvil) | a denoising diffusion model (DDPM) with classifier-free guidance; draws each digit 0–9 on request | 20 epochs in 44 s |
 | [`checkers.anvil`](examples/checkers.anvil) | checkers learned by self-play (TD learning) plus look-ahead search; play it with `bin/checkers` | beats a greedy player 94–6–0 after 4,000 games (14 s) |
+| [`named_dims.anvil`](examples/named_dims.anvil) | MNIST read row by row with attention; three classic shape bugs behind `--set BUG=1` (2, 3) that train silently with plain numbers and do not compile with names | 93.0% after 3 epochs (2 s) |
+| [`dream.anvil`](examples/dream.anvil) | gradients with respect to the input: the digit network's dreams of each digit, and real digits changed by at most 0.2 per pixel until it misreads all ten | 100% fooled, in under a second |
 
 ### Reinforcement learning: Snake
 
@@ -949,7 +1002,7 @@ convolutions.
 python3 -m pytest tests
 ```
 
-There are 289 tests:
+There are 321 tests:
 - Every autodiff rule is checked against float64 finite differences.
 - Optimized programs must match unoptimized ones exactly.
 - Native code must match the NumPy reference interpreter on tricky shapes (vector tails, gathers,
@@ -972,34 +1025,46 @@ There are 289 tests:
   match the interpreter.
 - `--check` must find the first NaN and the line that made it. `anvil export`'s libraries must
   give the same results when called from C. A real notebook with `%%anvil` cells must run.
+- Named dimensions: equal sizes with different names must not compile at any of the places two
+  dimensions meet; the names must survive slices, reshapes, index notation and layers; hovers,
+  call signatures and `anvil shapes` must show them.
+- A gradient through a run-time loop or branch must be refused (it used to come out silently
+  wrong), and the rewrites the error suggests must give exact gradients.
+- Every math function must match the interpreter on the GPU at extreme inputs. A checkpoint must
+  refuse to load into tensors of other shapes, and old checkpoints must still load.
 
 ## Layout
 
 ```
-anvil/            compiler: lexer, parser, elaborate (+ ops, builtins), autodiff, optimize,
-                interp (reference semantics), prelude.anvil (standard library), cli,
-                pyapi (anvil.function), export (C libraries), jupyter (%%anvil), ide (editors),
-                cost (anvil cost)
+anvil/            compiler: lexer, parser, elaborate (+ ops, builtins), dims (named dimensions),
+                autodiff, optimize, interp (reference semantics), prelude.anvil (standard library),
+                cli, pyapi (anvil.function), export (C libraries), jupyter (%%anvil),
+                ide (editors, anvil shapes), cost (anvil cost)
 anvil/backend/    AArch64: kernel lowering, vecmath (inline exp/log/tanh/sin/cos),
                 mir (register allocation), aarch64 (program codegen), runtime.s,
                 blas (matrix products on the AMX coprocessor);
                 Metal: metal.py, anvil_metal.h; CUDA: cuda.py, anvil_cuda.h; anvil_host.h (shared)
-examples/       programs, MNIST data, examples/errors/
-benchmarks/     Anvil against NumPy (run.py → results.md)
+examples/       programs, MNIST data, examples/errors/, examples/draw/ (bin/draw)
+benchmarks/     Anvil against NumPy (run.py → results.md); vs_pytorch/: nine projects in Anvil and
+                PyTorch, and REPORT.md
+bin/            anvil, draw, checkers
 experiments/    ablations and MNIST sweeps (run.py → results.md)
 editors/vscode/ syntax highlighting for VS Code and Cursor
 tests/          pytest suite
 docs/PLAN.md    design document and roadmap
+docs/EPIC.md    a ranked plan of where to go next (docs/BRAINSTORM.md: the 270 ideas behind it)
 ```
 
 ## Status
 
 It covers the language in the design document, with four backends: native multithreaded
 AArch64/macOS (with the AMX coprocessor for matrix products), the Apple GPU (Metal), CUDA (tested in
-emulation; not yet on an NVIDIA GPU), and the NumPy interpreter. Anvil functions can be called from
-Python and Jupyter, and exported as C libraries. Not done yet: Linux/x86 backends, differentiation
-through run-time loops (`static for` unrolls instead), and dynamic shapes. See the
-[roadmap](docs/PLAN.md#8-roadmap) and [the list of ideas](docs/IDEAS.md).
+emulation; not yet on an NVIDIA GPU), and the NumPy interpreter. Dimensions carry names, and
+mismatched names are compile errors. Anvil functions can be called from Python and Jupyter, and
+exported as C libraries. Not done yet: Linux/x86 backends, differentiation through run-time loops
+(`static for` unrolls instead; a gradient through a run-time loop is a compile error), and dynamic
+shapes. See the [roadmap](docs/PLAN.md#8-roadmap), [the list of ideas](docs/IDEAS.md), and
+[where to go next](docs/EPIC.md).
 
 ## About this repository's history
 
