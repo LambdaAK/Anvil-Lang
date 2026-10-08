@@ -9,6 +9,7 @@ import struct
 
 from . import ir
 from .diagnostics import AnvilError, fmt_shape
+from .dims import Dim
 from .ir import F32, I32, Affine, Const, Index, Rand, row_major_strides
 from .simplify import cast, mk_binary, mk_select, mk_unary
 from .values import (AffVal, BatchesVal, CVal, DistVal, EVal, FStrVal, IdxVal, ModelInstVal, NoneVal,
@@ -147,7 +148,7 @@ class BuiltinsMixin:
     def const_int(self, v, what, span) -> int:
         if not isinstance(v, CVal) or not v.is_int or isinstance(v.value, bool):
             raise AnvilError(f"{what} must be a compile-time integer, found {v.kind}", span)
-        return int(v.value)
+        return v.value if isinstance(v.value, Dim) else int(v.value)
 
     def shape_args(self, args, name, span) -> tuple:
         if len(args) == 1 and isinstance(args[0], TupleVal):

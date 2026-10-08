@@ -152,4 +152,6 @@ def suggest(name: str, candidates) -> str | None:
 
 
 def fmt_shape(shape) -> str:
-    return "[" + ", ".join(str(d) for d in shape) + "]"
+    """[BATCH=16, T=64, 4]: a named dimension with its size, others as numbers (see dims.py)."""
+    from .dims import Dim, show
+    return "[" + ", ".join(f"{show(d)}={int(d)}" if isinstance(d, Dim) else str(d) for d in shape) + "]"

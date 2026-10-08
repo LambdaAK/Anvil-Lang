@@ -1,6 +1,7 @@
 """Tensor-level operations: each one emits a kernel (or returns a zero-copy view)."""
 from __future__ import annotations
 
+from . import dims
 from .diagnostics import AnvilError, fmt_shape
 from .ir import (F32, I32, Acc, Affine, Buffer, Const, Expr, Index, Kernel, Load, Reduction,
                  ScalarRef, Store, Var, row_major_strides, subst_expr)
@@ -40,12 +41,12 @@ def clone_kernel_vars(domain, red_vars, exprs_fn):
     m = {}
     nd = []
     for v in domain:
-        nv = Var(v.name, v.extent)
+        nv = Var(v.name, v.size)
         m[v] = Affine.of(nv)
         nd.append(nv)
     nr = []
     for v in red_vars:
-        nv = Var(v.name, v.extent)
+        nv = Var(v.name, v.size)
         m[v] = Affine.of(nv)
         nr.append(nv)
     return nd, nr, m
@@ -177,7 +178,14 @@ class OpsMixin:
                                    label=f"{fmt_shape(a)} vs {fmt_shape(b)}",
                                    notes=[f"aligned from the right, dimension {d} is {size} on one side but {n} "
                                           f"on the other; sizes must match or be 1"])
-                size = n
+                if dims.conflict(size, n):
+                    a, b = shapes[0], shapes[1] if len(shapes) > 1 else shapes[0]
+                    raise AnvilError(f"cannot combine shapes {fmt_shape(a)} and {fmt_shape(b)}: dimension {d} is "
+                                   f"`{dims.show(size)}` on one side but `{dims.show(n)}` on the other", span,
+                                   label=f"{dims.show_shape(a)} vs {dims.show_shape(b)}",
+                                   notes=[dims.mismatch_note(size, n)], help=dims.same_size_help(size, n))
+                if size == 1 or not isinstance(size, dims.Dim):   # keep a name if either side has one
+                    size = n
             out.append(size)
         return tuple(out)
 
@@ -370,6 +378,13 @@ class OpsMixin:
             raise AnvilError("shape mismatch in `@`", span,
                            label=f"cannot multiply {fmt_shape(sa)} by {fmt_shape(sb)}",
                            notes=[f"the inner dimensions must agree ({k} ≠ {kb})"])
+        if dims.conflict(k, kb):
+            raise AnvilError("shape mismatch in `@`", span,
+                           label=f"cannot multiply {dims.show_shape(sa)} by {dims.show_shape(sb)}",
+                           notes=[f"the inner dimensions must be the same dimension: " + dims.mismatch_note(k, kb)],
+                           help=dims.same_size_help(k, kb))
+        if isinstance(kb, dims.Dim) and not isinstance(k, dims.Dim):
+            k = kb
 
         def mul_body(x, y):
             return mk_binary("mul", x, y)
@@ -399,6 +414,10 @@ class OpsMixin:
         # batched
         if a.rank != b.rank or sa[:-2] != sb[:-2]:
             raise AnvilError(f"batched `@` needs matching batch dimensions: {fmt_shape(sa)} @ {fmt_shape(sb)}", span)
+        bad = dims.first_conflict(sa[:-2], sb[:-2])
+        if bad:
+            raise AnvilError(f"batched `@` needs the same batch dimensions: {dims.show_shape(sa)} @ "
+                           f"{dims.show_shape(sb)}", span, notes=[dims.mismatch_note(bad[1], bad[2])])
         out_shape = sa[:-1] + (sb[-1],)
 
         def body(ov, rv):

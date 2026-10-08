@@ -10,6 +10,7 @@ import os
 from dataclasses import dataclass, field
 
 from . import ast as A
+from . import dims
 from . import ir
 from .builtins import BUILTIN_CONSTS, BUILTINS, BuiltinsMixin
 from .diagnostics import MAX_ERRORS, AnvilError, AnvilErrors, Label, PoisonError, fmt_shape, suggest
@@ -25,6 +26,12 @@ from .values import (AffVal, BatchesVal, Binding, BuiltinVal, CVal, EVal, FStrVa
                      ModelDefVal, ModelInstVal, NoneVal, OptDefVal, OptSpecVal, PickVal, PoisonVal, RangeVal, SVal,
                      Scope, TVal, TupleVal, Val)
 
+
+
+def set_extent(v, n):
+    """An index variable's range: the number for code generation, and its name if it has one."""
+    v.extent = int(n)
+    v.dim = n if isinstance(n, dims.Dim) else None
 
 class ReturnSignal(Exception):
     def __init__(self, value):
@@ -134,6 +141,8 @@ class Elaborator(OpsMixin, BuiltinsMixin):
     def __init__(self, source=None, seed: int = 0, consts: dict | None = None):
         self.source = source
         self.const_overrides = dict(consts or {})     # `--set NAME=VALUE` from the command line
+        self.dim_names: dict = {}                     # formula -> the constant that names it (dims.py)
+        dims.DIM_NAMES.set(self.dim_names)
         self.buffers: list[Buffer] = []
         self.blocks: list[Block] = [Block()]
         self.prelude_scope = Scope(kind="global")
@@ -331,9 +340,16 @@ class Elaborator(OpsMixin, BuiltinsMixin):
         name = s.name.id
         if self.scope is self.globals and name in self.const_overrides:
             v = self.const_overrides[name]
-            self.scope.vars[name] = Binding(SVal(v) if isinstance(v, str) else CVal(v), what="const", span=s.span)
+            self.scope.vars[name] = Binding(SVal(v) if isinstance(v, str) else CVal(dims.named(v, name)),
+                                            what="const", span=s.span)
             return
         val = self.eval_top(s.value)
+        if isinstance(val, CVal) and val.is_int and not isinstance(val.value, bool):
+            # every integer constant names a dimension (dims.py); a derived one (`const DH = D // HEADS`)
+            # keeps its formula and is shown by its own name
+            if isinstance(val.value, dims.Dim) and val.value.sym not in self.dim_names:
+                self.dim_names[val.value.sym] = name
+            val = CVal(dims.named(val.value, name))
         if not isinstance(val, (CVal, SVal, TupleVal)):
             raise AnvilError(f"`const {name}` must be known at compile time, but this is a {val.kind}", s.value.span,
                            help="drop `const` to make it a runtime variable")
@@ -425,6 +441,13 @@ class Elaborator(OpsMixin, BuiltinsMixin):
             else:
                 raise AnvilError(f"{what} is declared as {dtype}{fmt_shape(shape)} but the value has shape "
                                f"{fmt_shape(val.shape)}", span)
+        bad = dims.first_conflict(tuple(shape), val.shape)
+        if bad:
+            raise AnvilError(f"{what} is declared as {dtype}{dims.show_shape(shape)} but the value has shape "
+                           f"{dims.show_shape(val.shape)}", span, notes=[dims.mismatch_note(bad[1], bad[2])],
+                           help=dims.same_size_help(bad[1], bad[2]))
+        if dims.has_names(shape) and isinstance(val, TVal):  # the declaration names what had no name
+            val = TVal(val.buf, dims.adopt(tuple(shape), val.shape), val.tmpl, val.pvars, val.detached)
         if val.dtype != dtype:
             val = self.to_tensor(val, span, dtype)
         return val
@@ -492,6 +515,11 @@ class Elaborator(OpsMixin, BuiltinsMixin):
         if tuple(shape) != buf.shape:
             raise AnvilError(f"`{name}` changes shape inside the loop: {fmt_shape(buf.shape)} → {fmt_shape(shape)}",
                            span, help="variables that live across loop iterations must keep their shape")
+        bad = dims.first_conflict(buf.dims, tuple(shape))
+        if bad:
+            raise AnvilError(f"`{name}` changes dimensions inside the loop: {dims.show_shape(buf.dims)} → "
+                           f"{dims.show_shape(shape)}", span, notes=[dims.mismatch_note(bad[1], bad[2])],
+                           help="variables that live across loop iterations must keep their shape")
         if dtype != buf.dtype and not (dtype == I32 and buf.dtype == F32):
             raise AnvilError(f"`{name}` changes type inside the loop: {buf.dtype} → {dtype}", span)
 
@@ -591,7 +619,7 @@ class Elaborator(OpsMixin, BuiltinsMixin):
         if isinstance(val, TVal) and val.rank > 0:
             raise AnvilError(f"the right-hand side is a tensor of shape {fmt_shape(val.shape)}, not an element",
                            s.value.span, help="index it with the left-hand side's indices")
-        shape = tuple(v.extent for v in lhs)
+        shape = tuple(v.size for v in lhs)
         if b is not None and b.ref is not None:
             buf = b.ref
             if buf.shape != shape:
@@ -666,7 +694,7 @@ class Elaborator(OpsMixin, BuiltinsMixin):
             v = self.eval(w_bound)
             if not isinstance(v, CVal) or not v.is_int:
                 raise AnvilError("`where` bounds must be compile-time integers", w_bound.span)
-            ctx.where[ctx.names[w_name.id]] = int(v.value)
+            ctx.where[ctx.names[w_name.id]] = v.value if isinstance(v.value, dims.Dim) else int(v.value)
         self.comps.append(ctx)
         try:
             dest = self.subscript(base, s.items, sub)
@@ -693,7 +721,7 @@ class Elaborator(OpsMixin, BuiltinsMixin):
         if s.op == "-":
             final = mk_binary("sub", Const(0, final.dtype), final)
         if any(ld.buf.root is base.buf.root for ld in ir.loads_in(final)):
-            tmp = self.new_temp(tuple(v.extent for v in ctx.lhs), final.dtype)      # read before adding
+            tmp = self.new_temp(tuple(v.size for v in ctx.lhs), final.dtype)      # read before adding
             self.emit_kernel(self.make_kernel(ctx.lhs, tmp, final, span=s.span))
             final = Load(tmp, identity_offset(tmp, ctx.lhs))
         self.emit_kernel(self.make_kernel(ctx.lhs, base.buf, final, span=s.span, label="scatter",
@@ -1183,7 +1211,7 @@ class Elaborator(OpsMixin, BuiltinsMixin):
             raise AnvilError(f"shape dimensions must be compile-time integers, found {describe(v)}", d.span)
         if v.value < 0:
             raise AnvilError(f"negative dimension {v.value}", d.span)
-        return int(v.value)
+        return v.value if isinstance(v.value, dims.Dim) else int(v.value)
 
     # ------------------------------------------------------------------ expressions
     def undefined(self, name, span) -> AnvilError:
@@ -1433,10 +1461,12 @@ class Elaborator(OpsMixin, BuiltinsMixin):
         bound = self.bind_args(decl.params, args, kwargs, node, f"`{f.name}`", f.scope)
         scope = Scope(parent=f.scope, kind="fn", prefix=f.scope.prefix)
         shape_vars: dict[str, int] = {}
+        argvals = {}
         for p in decl.params:
             v = bound[p.name]
             if p.type is not None:
                 v = self.check_param_type(p, v, f, shape_vars, node)
+            argvals[p.name] = v
             scope.vars[p.name] = Binding(v, what="argument")
             if self.recorder is not None:
                 self.recorder.note(Span(p.span.file, p.span.start, p.span.start + len(p.name)), v, definition=True)
@@ -1478,6 +1508,12 @@ class Elaborator(OpsMixin, BuiltinsMixin):
             self.fn_runtime_base.pop()
         if decl.ret is not None:
             result = self.check_return_type(decl.ret, result, f, shape_vars, node)
+        if self.recorder is not None:
+            from .ide import CallSig, short
+            shown = [p for p in decl.params if not isinstance(argvals[p.name], (FnVal, ModelInstVal))]
+            sig = f"{f.name}(" + ", ".join(f"{p.name}: {short(argvals[p.name])}" for p in shown) + f") -> {short(result)}"
+            callee = getattr(node, "func", None)
+            self.recorder.note(callee.span if callee is not None else node.span, CallSig(sig))
         return result
 
     def add_call_site(self, e: AnvilError, f: FnVal, node):
@@ -1524,12 +1560,22 @@ class Elaborator(OpsMixin, BuiltinsMixin):
                     raise AnvilError(f"shape mismatch in call to `{f.name}`: `{nm}` is {shape_vars[nm]} from an "
                                    f"earlier argument but {actual} in {what}", node.span,
                                    notes=[f"`{f.name}` expects {what} : {self.fmt_type(t)}"])
-                shape_vars[nm] = actual
+                if nm in shape_vars and dims.conflict(shape_vars[nm], actual):
+                    raise AnvilError(f"shape mismatch in call to `{f.name}`: `{nm}` is `{dims.show(shape_vars[nm])}` "
+                                   f"from an earlier argument but `{dims.show(actual)}` in {what}", node.span,
+                                   notes=[dims.mismatch_note(shape_vars[nm], actual),
+                                          f"`{f.name}` expects {what} : {self.fmt_type(t)}"])
+                if nm not in shape_vars or isinstance(actual, dims.Dim):
+                    shape_vars[nm] = actual
             else:
                 want = self.eval_dim(d_ast, f.scope, shape_vars)
                 if want != actual:
                     raise AnvilError(f"shape mismatch in call to `{f.name}`: {what} should be "
                                    f"{self.fmt_type(t, shape_vars)} but has shape {fmt_shape(shape)}", node.span)
+                if dims.conflict(want, actual):
+                    raise AnvilError(f"shape mismatch in call to `{f.name}`: {what} should be "
+                                   f"{self.fmt_type(t)} but has shape {dims.show_shape(shape)}", node.span,
+                                   notes=[dims.mismatch_note(want, actual)], help=dims.same_size_help(want, actual))
 
     @staticmethod
     def fixed_dim(name: str, scope: Scope) -> bool:
@@ -1784,7 +1830,7 @@ class Elaborator(OpsMixin, BuiltinsMixin):
             v = self.eval(w_bound)
             if not isinstance(v, CVal) or not v.is_int:
                 raise AnvilError("`where` bounds must be compile-time integers", w_bound.span)
-            ctx.where[ctx.names[w_name.id]] = int(v.value)
+            ctx.where[ctx.names[w_name.id]] = v.value if isinstance(v.value, dims.Dim) else int(v.value)
         self.comps.append(ctx)
         try:
             val = self.eval(value)
@@ -1876,11 +1922,16 @@ class Elaborator(OpsMixin, BuiltinsMixin):
             if v.extent is not None:
                 continue
             if v in ctx.where:
-                v.extent = ctx.where[v]
+                set_extent(v, ctx.where[v])
                 for (size, sp, desc) in exact.get(v, []):
                     if size != v.extent:
                         raise AnvilError(f"index `{v.name}` is declared `< {v.extent}` but indexes a dimension of "
                                        f"size {size}", sp, label=desc)
+                    if dims.conflict(ctx.where[v], size):
+                        raise AnvilError(f"index `{v.name}` is declared `< {dims.show(ctx.where[v])}` but indexes a "
+                                       f"dimension of size `{dims.show(size)}`", sp, label=desc,
+                                       notes=[dims.mismatch_note(ctx.where[v], size)],
+                                       help=dims.same_size_help(ctx.where[v], size))
                 continue
             if v in exact:
                 (size0, sp0, desc0) = exact[v][0]
@@ -1890,7 +1941,15 @@ class Elaborator(OpsMixin, BuiltinsMixin):
                                        sp, label=f"{desc}: size {size}",
                                        labels=[ir_label(sp0, f"{desc0}: size {size0}")],
                                        notes=["every use of an index must agree on its range (this is the shape check)"])
-                v.extent = size0
+                    if dims.conflict(size0, size):
+                        raise AnvilError(f"index `{v.name}` ranges over `{dims.show(size0)}` in one place but "
+                                       f"`{dims.show(size)}` in another", sp,
+                                       label=f"{desc}: size {dims.show(size)}",
+                                       labels=[ir_label(sp0, f"{desc0}: size {dims.show(size0)}")],
+                                       notes=[dims.mismatch_note(size0, size)],
+                                       help=dims.same_size_help(size0, size))
+                # the range takes a name from any use that has one
+                set_extent(v, next((sz for sz, _, _ in exact[v] if isinstance(sz, dims.Dim)), size0))
         # bounded (affine) constraints
         changed = True
         while changed:
@@ -1916,7 +1975,7 @@ class Elaborator(OpsMixin, BuiltinsMixin):
                 if best is not None:
                     if best <= 0:
                         raise AnvilError(f"index `{v.name}` has an empty range here", span)
-                    v.extent = best
+                    set_extent(v, best)
                     changed = True
         for v in own:
             if v.extent is None:
@@ -1957,7 +2016,7 @@ class Elaborator(OpsMixin, BuiltinsMixin):
             return ir.map_expr(e, f)
 
         for t in ctx.pending:
-            shape = tuple(v.extent for v in t.domain)
+            shape = tuple(v.size for v in t.domain)
             body = resolve(t.body)
             op = t.op
             if op == "mean":
@@ -2123,6 +2182,8 @@ class Elaborator(OpsMixin, BuiltinsMixin):
         raise AnvilError("expected an integer index", span)
 
     def slice_bounds(self, start, stop, step, size, span):
+        named = {}                                    # the bounds' values, with their names (dims.py)
+
         def ev(x):
             if x is None:
                 return None
@@ -2130,6 +2191,7 @@ class Elaborator(OpsMixin, BuiltinsMixin):
             if isinstance(v, CVal):
                 if not v.is_int:
                     raise AnvilError("slice bounds must be integers", x.span)
+                named[id(x)] = v.value
                 return Affine(int(v.value))
             if isinstance(v, AffVal):
                 return v.affine
@@ -2156,6 +2218,10 @@ class Elaborator(OpsMixin, BuiltinsMixin):
             lo = min(max(a.const, 0), size)
             hi = min(max(b.const, 0), size)
             ln = max(0, (hi - lo + st - 1) // st)
+            if st == 1 and 0 <= a.const <= b.const <= size:  # `x[:, 1:T + 1]` has length T
+                sym = (named.get(id(stop), size) if stop is not None else size) - (named.get(id(start), 0) if start is not None else 0)
+                if isinstance(sym, dims.Dim) and int(sym) == ln:
+                    ln = sym
             return Affine(lo), ln, st
         diff = b - a
         if not diff.is_const():

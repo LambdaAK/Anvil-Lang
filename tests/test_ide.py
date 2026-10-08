@@ -42,18 +42,19 @@ def test_hovers_show_shapes_constants_indices_and_models(tmp_path):
     r = analyze(str(p))
     assert r["diagnostics"] == []
     assert hover(r, 0, 6) == "8 (compile-time constant, i32)"
-    assert hover(r, 1, 0) == "f32[8, 4]"
+    # a dimension named by a constant shows its name, then the numbers
+    assert hover(r, 1, 0) == "f32[B, 4] = [8, 4]"
     assert hover(r, 2, 6) == "param f32[4, 3]"
-    assert hover(r, 4, 0) == "f32[8, 3]"
+    assert hover(r, 4, 0) == "f32[B, 3] = [8, 3]"
     assert hover(r, 4, 4).startswith("fn layer(h: [n, d], M) = relu(h @ M)")
     # a function's parameter shows every shape it is called with
-    assert hover(r, 3, 9) == "f32[8, 4] | f32[2, 4]"
-    assert hover(r, 6, 2) == "index i < 8" and hover(r, 6, 16) == "index j < 3"
+    assert hover(r, 3, 9) == "f32[B, 4] = [8, 4] | f32[2, 4]"
+    assert hover(r, 6, 2) == "index i < B (8)" and hover(r, 6, 16) == "index j < 3"
     assert hover(r, 10, 0).startswith("Net (model, 10 parameters)")
     assert "l.W: f32[4, 2]" in hover(r, 10, 0)
     # inlay hints: after definitions of tensors, not where the line states the shape already
     inlays = {h["range"][0]: h["inlay"] for h in r["hovers"] if h.get("inlay")}
-    assert inlays[4] == "f32[8, 3]" and inlays[5] == "f32[2, 3]" and inlays[6] == "f32[8]"
+    assert inlays[4] == "f32[B, 3]" and inlays[5] == "f32[2, 3]" and inlays[6] == "f32[B]"
     assert 1 not in inlays and 2 not in inlays
 
 

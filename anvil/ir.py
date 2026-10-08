@@ -13,6 +13,8 @@ broadcasts, gathers) never copy.
 """
 from __future__ import annotations
 
+from .dims import Dim
+
 import itertools
 import math
 from dataclasses import dataclass, field
@@ -64,7 +66,8 @@ class Buffer:
     def __init__(self, name: str, shape, dtype: str = F32, kind: str = "temp", init=None, span=None):
         self.id = fresh_id()
         self.name = name
-        self.shape = tuple(int(d) for d in shape)
+        self.shape = tuple(int(d) for d in shape)       # numbers, for code generation
+        self.dims = tuple(shape)                        # the same, with names where they have them (dims.py)
         self.dtype = dtype
         self.kind = kind
         self.init = init          # list of python numbers for const buffers
@@ -100,10 +103,16 @@ class Var:
     def __init__(self, name: str, extent: int | None = None):
         self.id = fresh_id()
         self.name = name
-        self.extent = extent
+        self.dim = extent if isinstance(extent, Dim) else None    # the extent's name, if it has one
+        self.extent = None if extent is None else int(extent)
 
     def __repr__(self) -> str:
         return self.name
+
+    @property
+    def size(self):
+        """The extent, with its name if it has one (for shapes; code generation uses `extent`)."""
+        return self.dim if self.dim is not None else self.extent
 
 
 # ----------------------------------------------------------------------------- affine offsets

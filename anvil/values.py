@@ -82,7 +82,7 @@ class TVal(Val):
     def of(buf: Buffer) -> "TVal":
         pvars = [Var(f"p{d}", n) for d, n in enumerate(buf.shape)]
         tmpl = Affine(0, {v: s for v, s in zip(pvars, row_major_strides(buf.shape))})
-        return TVal(buf, buf.shape, tmpl, pvars)
+        return TVal(buf, buf.dims, tmpl, pvars)
 
     @property
     def dtype(self) -> str:

@@ -15,10 +15,29 @@ from __future__ import annotations
 import os
 
 from . import ast as A
+from .dims import formula, has_names, show, show_shape
 from .diagnostics import AnvilError, AnvilErrors, fmt_shape
 from .source import SourceFile, Span
 
 MAX_SHAPES = 4          # different values shown for one name (a function called with several shapes)
+
+
+class CallSig:
+    """How a function was called at a call site: its arguments' shapes and its result's."""
+    kind = "call"
+
+    def __init__(self, text: str):
+        self.text = text
+
+
+def short(val) -> str:
+    """A value's type in a signature: f32[BATCH, T, D] (names only; the hover of each name has the numbers)."""
+    from .values import CVal, TVal
+    if isinstance(val, TVal):
+        return f"{val.dtype}{show_shape(val.shape)}" if val.shape else f"{val.dtype}"
+    if isinstance(val, CVal):
+        return repr(val.value)
+    return describe(val).split("\n")[0]
 
 
 class Recorder:
@@ -46,19 +65,26 @@ def describe(val, name: str = "") -> str:
                          TupleVal, TVal)
     if isinstance(val, TVal):
         kind = "param " if val.buf.kind == "param" else ""
-        return f"{kind}{val.dtype}{fmt_shape(val.shape)}" if val.shape else f"{kind}{val.dtype} (scalar)"
+        if not val.shape:
+            return f"{kind}{val.dtype} (scalar)"
+        if has_names(val.shape):                      # f32[BATCH, T, D] = [16, 64, 64]
+            return f"{kind}{val.dtype}{show_shape(val.shape)} = [{', '.join(str(int(d)) for d in val.shape)}]"
+        return f"{kind}{val.dtype}{show_shape(val.shape)}"
     if isinstance(val, CVal):
         v = val.value
         if isinstance(v, bool):
             return f"{'true' if v else 'false'} (compile-time constant)"
-        return f"{v!r} (compile-time constant, {'i32' if isinstance(v, int) else 'f32'})"
+        f = formula(v)                                # `16 = D/HEADS` for `const DH = D // HEADS`
+        return f"{v!r}{f' = {f}' if f else ''} (compile-time constant, {'i32' if isinstance(v, int) else 'f32'})"
     if isinstance(val, SVal):
         return f'"{val.value}" (string constant)'
     if isinstance(val, IdxVal):
         vs = val.affine.vars()
         if len(vs) == 1 and val.affine.coef(vs[0]) == 1 and val.affine.const == 0:
             v = vs[0]
-            return f"index {v.name} < {v.extent}" if v.extent is not None else f"index {v.name}"
+            if v.extent is None:
+                return f"index {v.name}"
+            return f"index {v.name} < {show(v.dim)} ({v.extent})" if v.dim is not None else f"index {v.name} < {v.extent}"
         return "index expression"
     if isinstance(val, AffVal):
         return "i32 (run-time integer: a loop counter, or computed from one)"
@@ -107,8 +133,8 @@ def model_summary(inst) -> str:
         nonlocal total
         for name, b in m.scope.vars.items():
             if b.what == "param" and isinstance(b.val, TVal):
-                rows.append(f"  {prefix}{name}: {b.val.dtype}{fmt_shape(b.val.shape)}")
-                total += b.val.numel
+                rows.append(f"  {prefix}{name}: {describe(b.val).removeprefix('param ')}")
+                total += int(b.val.numel)
             elif isinstance(b.val, ModelInstVal):
                 walk(b.val, f"{prefix}{name}.")
     walk(inst, "")
@@ -176,16 +202,54 @@ def hovers(rec: Recorder) -> list[dict]:
     from .values import PoisonVal, TVal
     out = []
     for entry in rec.seen.values():
-        vals = [v for v in entry["vals"] if not isinstance(v, PoisonVal)]
-        if not vals:
+        sigs = list(dict.fromkeys(v.text for v in entry["vals"] if isinstance(v, CallSig)))
+        vals = [v for v in entry["vals"] if not isinstance(v, (PoisonVal, CallSig))]
+        if not vals and not sigs:
             continue
         texts = list(dict.fromkeys(describe(v) for v in vals))
         text = texts[0] if len(texts) == 1 else " | ".join(texts[:MAX_SHAPES]) + (" | …" if len(texts) > MAX_SHAPES else "")
+        if sigs:                                       # at a call: the shapes in and out, with their names
+            calls = "\n".join(sigs[:MAX_SHAPES]) + ("\n…" if len(sigs) > MAX_SHAPES else "")
+            text = (text + "\n\n" if text else "") + "called here as\n" + calls
         h = {"range": to_range(entry["span"]), "text": text, "definition": entry["definition"]}
         # a shape after each definition of a tensor (not when the line already states it)
         if entry["definition"] and not entry["annotated"] and all(isinstance(v, TVal) and v.shape for v in vals):
-            shapes = list(dict.fromkeys(f"{v.dtype}{fmt_shape(v.shape)}" for v in vals))
+            shapes = list(dict.fromkeys(f"{v.dtype}{show_shape(v.shape)}" for v in vals))
             h["inlay"] = " | ".join(shapes[:MAX_SHAPES])
         out.append(h)
     out.sort(key=lambda h: h["range"])
     return out
+
+
+def shape_sheet(path: str) -> str:
+    """`anvil shapes FILE`: the program's named dimensions, then every tensor it defines, line by line,
+    with its shape in names and in numbers."""
+    result = analyze(path)
+    lines = open(path, encoding="utf-8").read().splitlines()
+    out = []
+    names, rows = [], []
+    for h in result["hovers"]:
+        if not h["definition"]:
+            continue
+        l0, c0, l1, c1 = h["range"]
+        name = lines[l0][c0:c1] if l0 == l1 else lines[l0][c0:]
+        text = h["text"].split("\n")[0]
+        if text.endswith("(compile-time constant, i32)"):
+            v = text.removesuffix(" (compile-time constant, i32)")
+            names.append((name, v.split(" = ")[1] + " = " + v.split(" = ")[0] if " = " in v else v))
+        elif text.startswith(("f32", "i32", "param ")):
+            rows.append((l0 + 1, name, text))
+    dims = [f"{n} = {v}" for n, v in names]
+    if dims:
+        out.append("dimensions: " + ", ".join(dims))
+        out.append("")
+    width = max((len(n) for _, n, _ in rows), default=4)
+    seen = set()
+    for line, name, text in rows:
+        if (line, name) in seen:
+            continue
+        seen.add((line, name))
+        out.append(f"{line:5d}  {name:<{width}}  {text}")
+    for d in result["diagnostics"]:
+        out.append(f"{d['severity']} at line {d['range'][0] + 1}: {d['message'].splitlines()[0]}")
+    return "\n".join(out)

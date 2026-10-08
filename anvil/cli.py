@@ -28,6 +28,8 @@ usage:
                                    FLOPs and memory traffic, line by line
   anvil check <file.anvil>             type- and shape-check only (--json: errors and every name's
                                    shape, for editors; --stdin: read the text from stdin)
+  anvil shapes <file.anvil>            the program's named dimensions, then every tensor it defines,
+                                   line by line, with its shape in names and in numbers
   anvil repl                         try Anvil a line at a time
 
 options:
@@ -152,7 +154,8 @@ def main(argv=None):
         return repl_main()
     argv = ["--check=nan" if a == "--check" else a for a in argv]      # (a bare --check takes no value)
     p = argparse.ArgumentParser(prog="anvil", add_help=False)
-    p.add_argument("command", choices=["run", "build", "asm", "cuda", "metal", "ir", "check", "cost", "export"])
+    p.add_argument("command", choices=["run", "build", "asm", "cuda", "metal", "ir", "check", "cost", "export",
+                                       "shapes"])
     p.add_argument("file")
     p.add_argument("-o", dest="output")
     p.add_argument("--interp", action="store_true")
@@ -190,7 +193,11 @@ def main(argv=None):
     if not os.path.exists(args.file):
         print(f"{st.red('error')}{st.bold(f': no such file: {args.file}')}", file=sys.stderr)
         return 1
-    optimize = not (args.noopt or args.noopt2 or args.check)     # --check: one kernel per operation, one line each
+    if args.command == "shapes":
+        from .ide import shape_sheet
+        print(shape_sheet(args.file))
+        return 0
+    optimize = (args.noopt or args.noopt2 or args.check)     # --check: one kernel per operation, one line each
     if args.command == "export":
         from .export import export
         try:
