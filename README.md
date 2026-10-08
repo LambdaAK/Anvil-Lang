@@ -999,3 +999,9 @@ emulation; not yet on an NVIDIA GPU), and the NumPy interpreter. Anvil functions
 Python and Jupyter, and exported as C libraries. Not done yet: Linux/x86 backends, differentiation
 through run-time loops (`static for` unrolls instead), and dynamic shapes. See the
 [roadmap](docs/PLAN.md#8-roadmap) and [the list of ideas](docs/IDEAS.md).
+
+## About this repository's history
+
+This repository doubles as a classroom example of how git records history. Its commit dates were
+set with `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` to spread the project's development over six
+months; they are not the dates the code was written.
