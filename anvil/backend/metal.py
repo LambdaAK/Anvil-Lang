@@ -54,6 +54,9 @@ inline int anvil_imin(int a, int b) { return a < b ? a : b; }
 inline float anvil_fsign(float a) { return a > 0 ? 1.0f : (a < 0 ? -1.0f : a); }
 inline int anvil_isign(int a) { return a > 0 ? 1 : (a < 0 ? -1 : 0); }
 inline float anvil_sigmoid(float a) { return 1.0f / (1.0f + exp(-a)); }
+// Metal's tanh overflows to nan for large |a| (it computes with exp(2a)); past |a| = 10 tanh is ±1 in
+// float anyway. A nan stays a nan, for --check.
+inline float anvil_tanh(float a) { return (fabs(a) <= 10.0f || isnan(a)) ? tanh(a) : copysign(1.0f, a); }
 inline int anvil_f2i(float a) { return (int)trunc(a); }
 inline void anvil_atomic_add(device float *p, float v) { atomic_fetch_add_explicit((device atomic_float *)p, v, memory_order_relaxed); }
 inline void anvil_atomic_add(device int *p, int v) { atomic_fetch_add_explicit((device atomic_int *)p, v, memory_order_relaxed); }
@@ -65,7 +68,7 @@ inline void anvil_fail(device atomic_int *f, int code, long value) {
 }
 """
 
-MATH = {"expf": "exp", "logf": "log", "sqrtf": "sqrt", "tanhf": "tanh", "sinf": "sin", "cosf": "cos",
+MATH = {"expf": "exp", "logf": "log", "sqrtf": "sqrt", "tanhf": "anvil_tanh", "sinf": "sin", "cosf": "cos",
         "fabsf": "fabs", "floorf": "floor", "ceilf": "ceil", "rintf": "rint", "powf": "pow", "truncf": "trunc"}
 MAX_BUFFERS = 31
 MPS_MIN = 1 << 15          # M·N·K from which a product goes to Metal Performance Shaders

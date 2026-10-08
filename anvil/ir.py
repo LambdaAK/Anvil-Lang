@@ -741,6 +741,20 @@ def walk_blocks(block: Block):
             yield from walk_blocks(s.orelse)
 
 
+def ckpt_key(b: Buffer) -> int:
+    """What a checkpoint stores for a tensor: its element count (the low 32 bits) and a hash of its
+    dtype, shape and name inside the model (the high 32 bits, `b1.Wq` for `net.b1.Wq`). A checkpoint
+    then loads only into tensors of the same shapes in the same places: a transposed weight, or two
+    layers swapped, no longer load silently."""
+    if b.numel >= 1 << 32:
+        raise ValueError(f"{b.name} is too large to checkpoint ({b.numel:,} elements)")
+    inside = b.name.split(".", 1)[1] if "." in b.name else ""
+    h = 2166136261                                    # FNV-1a
+    for byte in f"{inside}:{b.dtype}:{','.join(map(str, b.shape))}".encode():
+        h = ((h ^ byte) * 16777619) & 0xFFFFFFFF
+    return (h or 1) << 32 | b.numel
+
+
 def all_kernels(prog: Program) -> list[Kernel]:
     out = []
     for b in walk_blocks(prog.main):

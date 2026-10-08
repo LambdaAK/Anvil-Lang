@@ -1234,8 +1234,10 @@ Lshow_done:
     ret
 
 // ---------------------------------------------------------------------------
-// Checkpoints (save / load). The file holds "EINW", u32 version 1, u64 n, n u64 element counts,
-// then every tensor's elements (4 bytes each). tab: n entries {void *data, u64 count}.
+// Checkpoints (save / load). The file holds "EINW", u32 version 2, u64 n, n u64 keys, then every
+// tensor's elements (4 bytes each). tab: n entries {void *data, u64 key}; a key is the element count
+// (low 32 bits) and a hash of the tensor's shape and place in its model (ir.ckpt_key). Files of
+// version 1 hold element counts in place of keys; they still load, checked by count only.
 
 // void _anvil_rt_save(const char *path, const entry *tab, int64 n)
     .p2align 2
@@ -1253,9 +1255,9 @@ _anvil_rt_save:
     bl _fopen
     cbz x0, Lsave_fail
     mov x22, x0                         // FILE *
-    movz x9, #0x4945                    // "EINW", version 1
+    movz x9, #0x4945                    // "EINW", version 2
     movk x9, #0x574e, lsl #16
-    movk x9, #1, lsl #32
+    movk x9, #2, lsl #32
     str x9, [sp, #56]
     add x0, sp, #56
     mov x1, #8
@@ -1286,7 +1288,8 @@ Lsave_data:
     cmp x23, x21
     b.ge Lsave_close
     add x9, x20, x23, lsl #4
-    ldp x0, x2, [x9]                    // data, count
+    ldp x0, x2, [x9]                    // data, key
+    mov w2, w2                          // the count: the key's low 32 bits
     mov x1, #4
     mov x3, x22
     bl _fwrite
@@ -1334,9 +1337,16 @@ _anvil_rt_load:
     bl Lload_word
     movz x10, #0x4945
     movk x10, #0x574e, lsl #16
+    movk x10, #2, lsl #32
+    mov x11, #0
+    cmp x9, x10
+    b.eq Lload_version                  // version 2: keys must match exactly
     movk x10, #1, lsl #32
+    mov x11, #1                         // version 1: element counts only
     cmp x9, x10
     b.ne Lload_close
+Lload_version:
+    str x11, [sp, #72]
     bl Lload_word
     cmp x9, x21
     b.ne Lload_close
@@ -1347,9 +1357,14 @@ Lload_sizes:
     b.ge Lload_check_size
     bl Lload_word
     add x10, x20, x23, lsl #4
-    ldr x10, [x10, #8]
+    ldr x10, [x10, #8]                  // the key
+    ldr x11, [sp, #72]
+    cbz x11, Lload_exact
+    mov w10, w10                        // a version 1 file: compare the counts only
+Lload_exact:
     cmp x9, x10
     b.ne Lload_close
+    mov w10, w10                        // the count
     add x24, x24, x10
     add x23, x23, #1
     b Lload_sizes
@@ -1374,7 +1389,8 @@ Lload_data:
     cmp x23, x21
     b.ge Lload_done
     add x9, x20, x23, lsl #4
-    ldp x0, x2, [x9]                    // data, count
+    ldp x0, x2, [x9]                    // data, key
+    mov w2, w2                          // the count
     mov x24, x2
     mov x1, #4
     mov x3, x22

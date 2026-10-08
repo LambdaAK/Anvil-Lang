@@ -140,7 +140,7 @@ class ProgramGen:
         self.threads = threads
         self.par_grain: dict[int, int] = {}
         self.glyph_tables: dict = {}
-        self.ckpt_tables: dict = {}             # save / load: {data, count} per tensor
+        self.ckpt_tables: dict = {}             # save / load: {data, key} per tensor (ir.ckpt_key)
         self.prof_ids: dict[int, int] = {}
         self.prof_kernels: dict[int, ir.Kernel] = {}
         self.out: list[str] = []
@@ -190,7 +190,7 @@ class ProgramGen:
         if hit is None:
             if any(b.root.kind in ir.EXTERN_KINDS for b in bufs):
                 raise NotImplementedError("save/load of a function's arguments or results")
-            hit = (f"Lckpt{len(self.ckpt_tables)}", [(self.sym(b), b.numel) for b in bufs])
+            hit = (f"Lckpt{len(self.ckpt_tables)}", [(self.sym(b), ir.ckpt_key(b.root)) for b in bufs])
             self.ckpt_tables[key] = hit
         return hit[0]
 

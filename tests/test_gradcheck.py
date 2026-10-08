@@ -95,3 +95,54 @@ print(max(abs(dlo - 2 * u * (1 - frac))))
         assert code == 0, err
     errors = [float(x) for x in text.split()]
     assert len(errors) == 4 and max(errors) < 1e-4, text
+
+
+def test_gradients_through_run_time_control_flow_are_refused():
+    """Gradients are taken through `static for` and compile-time `if` only. A gradient whose path
+    runs through a run-time loop or branch used to come out silently wrong ([1, 1, 1, 1] for
+    d sum(x⁴)/dx through a run-time `for`, and zero through a run-time `if`); now it is an error that
+    says how to write it, and the ways it suggests give the right gradients."""
+    from anvil.diagnostics import AnvilError
+    from util import compile_text, run_native
+    loop = """
+x: [4] = [1.0, 2.0, 3.0, 4.0]
+y = x
+for k in range(3):
+    y = y * x
+print(grad(sum(y), x))
+"""
+    branch = """
+c: [4] = [1.0, -2.0, 3.0, -4.0]
+x: [4] = [1.0, 2.0, 3.0, 4.0]
+if sum(c) < 0:
+    z = c * c
+else:
+    z = c
+print(grad(sum(z * x), c))
+"""
+    after = """
+param w: [3] ~ normal(0, 1)
+param v: [3] ~ normal(0, 1)
+loss = sum(w * v)
+if sum(v) < 100:
+    v[0] = 0.0
+minimize loss over w with sgd(lr=0.1)
+"""
+    for src, says in ((loop, "run-time `for` loop"), (branch, "run-time `if`"), (after, "is modified after it was used")):
+        with pytest.raises(AnvilError) as e:
+            compile_text(src)
+        assert says in e.value.message, e.value.message
+    out, err, code, _ = run_native(loop.replace("for k", "static for k") + branch.replace(
+        "if sum(c) < 0:\n    z = c * c\nelse:\n    z = c\n", "z = c * c if sum(c) < 0 else c\n"))
+    assert code == 0, err
+    assert out.split("\n")[:2] == ["[4.0000, 32.0000, 108.0000, 256.0000]", "[2.0000, -8.0000, 18.0000, -32.0000]"], out
+    # what a run-time branch computes without derivatives (an action chosen by argmax) is fine
+    compile_text("""
+param w: [3] ~ normal(0, 1)
+x: [3] = [1.0, 2.0, 3.0]
+a: i32[1] = 0
+if sum(x) > 0:
+    a[0] = argmax(x * w)
+loss = sum(w * w) * f32(a[0] + 1)
+minimize loss with sgd(lr=0.1)
+""")

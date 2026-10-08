@@ -229,6 +229,51 @@ print("not reached")
     assert "not reached" not in out
 
 
+def test_checkpoints_check_shapes(tmp_path):
+    """A checkpoint loads only into tensors of the same shapes in the same places. Version 1 files
+    stored element counts only, so a transposed weight, or two same-shaped layers declared in the
+    other order, loaded silently into the wrong places. Renaming the model's variable is fine, and
+    version 1 files still load (checked by count)."""
+    import struct
+
+    import numpy as np
+
+    from util import check_cuda, check_metal
+    f = tmp_path / "w.weights"
+    src = f"""
+model A:
+    param W: [4, 8] ~ normal(0, 1)
+model B:
+    param W: [8, 4] ~ normal(0, 1)
+model P:
+    l1 = Linear(4, 4)
+    l2 = Linear(4, 4)
+model Q:
+    l2 = Linear(4, 4)
+    l1 = Linear(4, 4)
+a = A()
+save(a, "{f}")
+print("transposed", load(B(), "{f}"), "same", load(A(), "{f}"))
+p = P()
+save(p, "{f}")
+renamed = P()
+print("swapped", load(Q(), "{f}"), "renamed", load(renamed, "{f}"), sum(abs(renamed.l2.W - p.l2.W)))
+"""
+    for check in (check_native, check_metal, check_cuda):
+        out = check(src)
+        assert "transposed 0.0000 same 1.0000" in out and "swapped 0.0000 renamed 1.0000 0.0000" in out, out
+    old = tmp_path / "old.weights"                       # a version 1 file: "EINW", 1, n, counts, data
+    data = np.arange(32, dtype=np.float32)
+    old.write_bytes(struct.pack("<4sIQQ", b"EINW", 1, 1, 32) + data.tobytes())
+    out = check_native(f"""
+model A:
+    param W: [4, 8]
+a = A()
+print(load(a, "{old}"), sum(a.W))
+""")
+    assert out.split() == ["1.0000", "496.0000"], out
+
+
 def test_save_and_load(tmp_path):
     """A roundtrip restores the parameters; a missing file or one with other sizes changes nothing;
     a file written by native code loads in the interpreter."""

@@ -337,8 +337,8 @@ class Interpreter:
             bufs = a["bufs"]
             try:
                 with open(a["path"], "wb") as f:
-                    f.write(CKPT_HEAD.pack(CKPT_MAGIC, 1, len(bufs)))
-                    f.write(struct.pack(f"<{len(bufs)}Q", *[b.numel for b in bufs]))
+                    f.write(CKPT_HEAD.pack(CKPT_MAGIC, 2, len(bufs)))
+                    f.write(struct.pack(f"<{len(bufs)}Q", *[ir.ckpt_key(b.root) for b in bufs]))
                     for b in bufs:
                         f.write(self.arr(b)[:b.numel].astype(np.int32 if b.dtype == I32 else np.float32).tobytes())
             except OSError:
@@ -351,8 +351,11 @@ class Interpreter:
                     raw = f.read()
                 sizes = [b.numel for b in bufs]
                 head = CKPT_HEAD.size + 8 * len(bufs)
-                if len(raw) == head + 4 * sum(sizes) and CKPT_HEAD.unpack_from(raw) == (CKPT_MAGIC, 1, len(bufs)) \
-                        and list(struct.unpack_from(f"<{len(bufs)}Q", raw, CKPT_HEAD.size)) == sizes:
+                magic, version, n = CKPT_HEAD.unpack_from(raw) if len(raw) >= CKPT_HEAD.size else (None, 0, 0)
+                # version 2 stores ir.ckpt_key (count and shape hash); version 1 only the counts
+                want = [ir.ckpt_key(b.root) for b in bufs] if version == 2 else sizes
+                if len(raw) == head + 4 * sum(sizes) and magic == CKPT_MAGIC and version in (1, 2) \
+                        and n == len(bufs) and list(struct.unpack_from(f"<{len(bufs)}Q", raw, CKPT_HEAD.size)) == want:
                     pos = head
                     for b in bufs:
                         data = np.frombuffer(raw, np.int32 if b.dtype == I32 else np.float32, b.numel, pos)

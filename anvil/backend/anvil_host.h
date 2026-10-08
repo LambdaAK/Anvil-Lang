@@ -231,28 +231,33 @@ static void anvil_save_npy(const char *path, const unsigned char *header, long h
     fclose(f);
 }
 
-struct anvil_ckpt { void *data; long count; };
+struct anvil_ckpt { void *data; uint64_t key; };      // key: the element count (low 32 bits) and a shape hash
 
 static void anvil_save(const char *path, const anvil_ckpt *tab, long n) {
     FILE *f = fopen(path, "wb");
     if (!f) { fprintf(stderr, "anvil: cannot write %s\n", path); return; }
-    uint64_t head = 0x00000001574E4945ull, cnt = (uint64_t)n;
+    uint64_t head = 0x00000002574E4945ull, cnt = (uint64_t)n;          // "EINW", version 2
     fwrite(&head, 8, 1, f); fwrite(&cnt, 8, 1, f);
-    for (long i = 0; i < n; i++) { uint64_t c = (uint64_t)tab[i].count; fwrite(&c, 8, 1, f); }
-    for (long i = 0; i < n; i++) fwrite(tab[i].data, 4, tab[i].count, f);
+    for (long i = 0; i < n; i++) fwrite(&tab[i].key, 8, 1, f);
+    for (long i = 0; i < n; i++) fwrite(tab[i].data, 4, (long)(tab[i].key & 0xFFFFFFFFull), f);
     fclose(f);
 }
 
 static float anvil_load(const char *path, const anvil_ckpt *tab, long n) {
     FILE *f = fopen(path, "rb");
     if (!f) return 0;
-    uint64_t head, cnt, total = 0;
-    int ok = fread(&head, 8, 1, f) == 1 && head == 0x00000001574E4945ull && fread(&cnt, 8, 1, f) == 1 && cnt == (uint64_t)n;
+    uint64_t head = 0, cnt, total = 0;
+    int ok = fread(&head, 8, 1, f) == 1 && (head == 0x00000002574E4945ull || head == 0x00000001574E4945ull)
+             && fread(&cnt, 8, 1, f) == 1 && cnt == (uint64_t)n;
+    uint64_t mask = head == 0x00000002574E4945ull ? ~0ull : 0xFFFFFFFFull;   // version 1 stored counts only
     for (long i = 0; ok && i < n; i++) {
-        uint64_t c; ok = fread(&c, 8, 1, f) == 1 && c == (uint64_t)tab[i].count; total += c;
+        uint64_t c; ok = fread(&c, 8, 1, f) == 1 && c == (tab[i].key & mask); total += tab[i].key & 0xFFFFFFFFull;
     }
     if (ok) { fseek(f, 0, SEEK_END); ok = ftell(f) == (long)(16 + 8 * n + 4 * total); fseek(f, 16 + 8 * n, SEEK_SET); }
-    for (long i = 0; ok && i < n; i++) ok = (long)fread(tab[i].data, 4, tab[i].count, f) == tab[i].count;
+    for (long i = 0; ok && i < n; i++) {
+        long count = (long)(tab[i].key & 0xFFFFFFFFull);
+        ok = (long)fread(tab[i].data, 4, count, f) == count;
+    }
     fclose(f);
     return ok ? 1.0f : 0.0f;
 }

@@ -26,19 +26,48 @@ class GradInfo:
     initialized: bool = False
 
 
-def ad_region(elab) -> list[Kernel]:
-    """Kernels that ran earlier in the current loop iteration (or program, outside loops)."""
+def ad_blocks(elab):
+    """The open blocks of the current loop iteration (or of the program, outside loops)."""
     blocks = elab.blocks
     start = 0
     for i in range(len(blocks) - 1, -1, -1):
         if blocks[i].is_loop:
             start = i
             break
-    out = []
-    for b in blocks[start:]:
+    return blocks[start:]
+
+
+def ad_region(elab) -> list[Kernel]:
+    """Kernels that ran earlier in the current loop iteration (or program, outside loops)."""
+    return [st.kernel for b in ad_blocks(elab) for st in b.stmts if isinstance(st, KernelStmt)]
+
+
+@dataclass
+class Hidden:
+    """A run-time loop or branch that ran earlier in the region. Gradients are not taken through
+    the kernels inside it, so a gradient whose path runs through it would be wrong."""
+    after: int                # how many region kernels come before it
+    kind: str                 # "for", "while", "if"
+    span: object
+    reads: set                # buffers its kernels read differentiably
+    writes: set
+
+
+def ad_hidden(elab) -> list[Hidden]:
+    out, count = [], 0
+    for b in ad_blocks(elab):
         for st in b.stmts:
             if isinstance(st, KernelStmt):
-                out.append(st.kernel)
+                count += 1
+            elif isinstance(st, (ir.For, ir.While, ir.If)):
+                reads, writes = set(), set()
+                for blk in ir.walk_blocks(ir.Block([st])):
+                    for s2 in blk.stmts:
+                        if isinstance(s2, KernelStmt):
+                            reads |= {ld.buf.root for ld in kernel_diff_loads(s2.kernel)}
+                            writes |= s2.kernel.writes()
+                kind = "for" if isinstance(st, ir.For) else "while" if isinstance(st, ir.While) else "if"
+                out.append(Hidden(count, kind, st.span, reads, writes))
     return out
 
 
@@ -89,11 +118,46 @@ def covers(off: Affine, vars_, numel: int) -> bool:
 
 
 class Backprop:
-    def __init__(self, elab, region: list[Kernel], span):
+    def __init__(self, elab, region: list[Kernel], span, hidden: list[Hidden] = ()):
         self.elab = elab
         self.region = region
+        self.hidden = list(hidden)
         self.span = span
         self.grads: dict[Buffer, GradInfo] = {}
+
+    def check_hidden(self, need: set, target_set: set, loss: Buffer):
+        """A gradient cannot pass through a run-time loop or branch (only through `static for` and
+        compile-time `if`): say so, rather than differentiate as if it were not there."""
+        if not self.hidden:
+            return
+        fwd = set(target_set)                         # what depends on the targets, through everything
+        pending = sorted(self.hidden, key=lambda h: h.after)
+        for i, k in enumerate(self.region + [None]):
+            while pending and pending[0].after <= i:
+                h = pending.pop(0)
+                if h.reads & fwd:
+                    fwd |= h.writes
+            if k is not None and any(ld.buf.root in fwd for ld in kernel_diff_loads(k)):
+                fwd |= k.writes()
+        made = max((i for i, k in enumerate(self.region) if loss in k.writes()), default=-1)
+        for h in self.hidden:
+            bad = sorted((b for b in h.writes & need & fwd if b not in target_set), key=lambda b: b.name)
+            if not bad:
+                continue
+            what = {"for": "a run-time `for` loop", "while": "a `while` loop", "if": "a run-time `if`"}[h.kind]
+            if h.after > made:
+                raise AnvilError(f"`{bad[0].name}` is modified in {what} after it was used to compute the loss, "
+                               f"so its gradient would be wrong", h.span or self.span,
+                               help="take the gradient before the loop or branch, or compute the loss after it")
+            hint = ("unroll it with `static for` (its count must be known at compile time)" if h.kind == "for" else
+                    "write the choice as one expression instead, e.g. `z = a if cond else b`; a condition on "
+                    "compile-time constants is decided while compiling and is fine" if h.kind == "if" else
+                    "unroll it with `static for`")
+            raise AnvilError(f"the gradient would have to pass through {what}: `{bad[0].name}` is computed inside it "
+                           f"from what is being differentiated, and Anvil can only differentiate through "
+                           f"`static for` loops and compile-time conditions", h.span or self.span,
+                           help=f"{hint}; or, if `{bad[0].name}` should count as a constant here (like a "
+                                f"target network copied from the weights), use `detach(...)`")
 
     def run(self, loss: Buffer, targets: list[Buffer], seed: float):
         producers: dict[Buffer, list[Kernel]] = {}      # every kernel that writes each buffer
@@ -119,6 +183,7 @@ class Backprop:
         for k in self.region:
             if any(ld.buf.root in fwd for ld in kernel_diff_loads(k)):
                 fwd |= k.writes()
+        self.check_hidden(need, target_set, loss.root)
         active = need & fwd
         if loss.root not in active:
             return {}
@@ -129,7 +194,8 @@ class Backprop:
             for b in {ld.buf.root for e in k.exprs() for ld in ir.loads_in(e)}:
                 if b.kind in ("temp", "grad", "const", "data", "input"):
                     continue
-                if any(b in later.writes() for later in self.region[i + 1:]):
+                if any(b in later.writes() for later in self.region[i + 1:]) or \
+                        any(h.after > i and b in h.writes for h in self.hidden):
                     raise AnvilError(f"`{b.name}` is modified after it was used to compute the loss, so its "
                                    f"gradient would be wrong", self.span,
                                    help="compute the loss after the update, or take the gradient before it")
@@ -300,7 +366,7 @@ def grad(elab, loss_val, targets, node) -> list[TVal]:
             raise AnvilError("can only differentiate with respect to a whole tensor variable, not a view", tnode.span,
                            help="copy it first: `x = copy(x)` before using it")
         bufs.append(tv.buf)
-    bp = Backprop(elab, ad_region(elab), node.span)
+    bp = Backprop(elab, ad_region(elab), node.span, ad_hidden(elab))
     grads = bp.run(loss.buf, bufs, 1.0)
     out = []
     for b, t in zip(bufs, targets):
@@ -359,7 +425,7 @@ def minimize(elab, s: A.Minimize):
                 raise AnvilError("`over` takes parameters or models", o.span)
     else:
         targets = [b for b in elab.buffers if b.kind == "param"]
-    bp = Backprop(elab, ad_region(elab), span)
+    bp = Backprop(elab, ad_region(elab), span, ad_hidden(elab))
     grads = bp.run(loss.buf, targets, -1.0 if s.maximize else 1.0)
     params = [p for p in targets if p.root in grads and grads[p.root].buf is not None]
     if not params:

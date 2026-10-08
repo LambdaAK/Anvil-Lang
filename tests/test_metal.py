@@ -119,3 +119,15 @@ print(w[0:4])
 """
     check_metal(src)
     assert "_more &anvil_more" in generate(compile_text(src).program)
+
+
+def test_math_at_extremes():
+    """Every elementwise function against the interpreter far out on both sides. Metal's own tanh
+    overflows to nan for large inputs (and gelu with it), so tanh goes through a guarded wrapper."""
+    check_metal("""
+x: [12] = [-200.0, -90.0, -30.0, -10.0, -1.0, -0.001, 0.0, 0.001, 1.0, 10.0, 30.0, 90.0]
+p = abs(x) + 0.5
+print(tanh(x), sigmoid(x), gelu(x), silu(x), softplus(x), elu(x))
+print(exp(x / 10), log(p), sqrt(p), rsqrt(p), sin(x), cos(x), p ** 1.5)
+print(log_softmax(x), softmax(x), bce(sigmoid(x), sigmoid(x / 2)))
+""")

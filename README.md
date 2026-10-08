@@ -63,8 +63,9 @@ almost twice as long.
   The SGD update ends up inside the weight-gradient matrix multiply, and the gradient is never
   stored to memory.
 - **Readable assembly.** Each kernel becomes one function, headed by the math it computes.
-- **Multithreaded.** Large kernels split their outermost loop across cores. Results are
-  bit-identical for any number of threads.
+- **Multithreaded.** Large kernels split their outermost loop across cores. On a given machine,
+  results are bit-identical for any number of threads. Another chip can round Accelerate's matrix
+  products differently.
 - **The standard library is written in Anvil.** Layers, losses, and optimizers live in
   [`anvil/prelude.anvil`](anvil/prelude.anvil), so you can read, copy, and change them.
 - **Static and safe.** Every buffer has a fixed address. Index bounds are proven at compile time

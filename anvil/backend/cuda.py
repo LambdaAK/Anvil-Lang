@@ -578,7 +578,7 @@ class CudaGen:
             return [f"if (anvil_input({self.bname(b)})) goto anvil_end;"]
         if n in ("save", "load"):
             tab = self.label("ckpt")
-            entries = ", ".join(f"{{{self.bname(x)}, {x.numel}L}}" for x in a["bufs"])
+            entries = ", ".join(f"{{{self.bname(x)}, {ir.ckpt_key(x.root)}ULL}}" for x in a["bufs"])
             self.ckpts.append(f"    anvil_ckpt {tab}[] = {{{entries}}};")
             if n == "save":
                 return [f'anvil_save("{c_escape(a["path"])}", {tab}, {len(a["bufs"])}L);']
