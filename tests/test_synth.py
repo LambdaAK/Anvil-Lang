@@ -40,3 +40,23 @@ progs, steps = write(net, spec, 1.0)
 '''
     c = compile_text(src, path=os.path.join(ROOT, "examples", "synth", "t.anvil"))
     assert len(P.VOCAB) == c.elab.globals.vars["VOCAB"].val.value
+
+
+def test_the_search_scores_and_edits():
+    """search.py: partial credit for nearly right outputs, and edits that hide part of a program."""
+    import numpy as np
+    import search as S
+    ex = [([1, 2, 3], [2, 4, 6]), ([5, 0, 4], [10, 0, 8])]
+    assert S.score(P.parse("map ( * 2 )".split()), ex) == 2.0
+    wrong_length = S.score(P.parse("take ( 2 )".split()), ex)               # [1, 2], [5, 0]: nothing right
+    right_length = S.score(P.parse("map ( * 3 )".split()), ex)              # [3, 6, 9]: the right length
+    half_right = S.score(P.parse("map ( * 2 ) |> take ( 2 )".split()), ex)  # [2, 4]: the first two right
+    assert 0 <= wrong_length < right_length < half_right < 2
+    assert S.score(None, ex) == -1.0
+    assert S.closeness(7, 6) > S.closeness(9, 6) > S.closeness([6], 6) == 0.0
+    rng = np.random.default_rng(0)
+    ids = P.encode_program(P.parse("filter ( odd ) |> map ( * 3 ) |> sum".split()))
+    for _ in range(200):
+        e = S.edit(ids, rng)
+        assert len(e) == len(ids) and P.MASK in e
+        assert all(a == b for a, b in zip(e, ids) if a != P.MASK)        # only hides, never changes

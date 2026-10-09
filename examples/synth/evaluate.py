@@ -79,5 +79,28 @@ def main():
         print(f"    model's program: {P.show(program) if program else '(not a program)'}   {'✓' if ok else '✗'}")
 
 
+def search(n: int, tries: int = 8, rounds: int = 8):
+    """The same tasks, written by search.py: the likeliest program alone; the shortest of `tries`
+    programs that fits the examples shown; and the same after `rounds` rounds of write, run, fix."""
+    import time
+    import search as S
+    tasks = [json.loads(line) for line in open(os.path.join(DATA, "test.jsonl"))][:n]
+    s = S.Search(batch=256)
+    shown = [[(xs, ys) for xs, ys in t["examples"][:P.N_SHOWN]] for t in tasks]
+    print(f"{n} test tasks, programs never seen in training; right = also right on the 4 hidden examples")
+    for r in (0, rounds):
+        start = time.time()
+        pools = s.run_many(shown, tries=tries, rounds=r)
+        if r == 0:
+            right = sum(fits(pool[0].program, t["examples"]) for pool, t in zip(pools, tasks))
+            print(f"  the likeliest program                          {100 * right / n:5.1f}%")
+        right = sum(fits(S.first_fit(pool, P.N_SHOWN).program, t["examples"]) for pool, t in zip(pools, tasks))
+        what = f"{tries} tries, the shortest that fits" if r == 0 else f"{tries} tries and {r} rounds of write, run, fix"
+        print(f"  {what:46s} {100 * right / n:5.1f}%   ({time.time() - start:.0f} s)")
+
+
 if __name__ == "__main__":
-    main()
+    if sys.argv[1:2] == ["--search"]:
+        search(int(sys.argv[2]) if len(sys.argv) > 2 else 200)
+    else:
+        main()

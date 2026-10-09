@@ -52,25 +52,36 @@ model Writer:
             x = block(x)
         return out(norm(x)[:, SPEC:SEQ, :])
 
-# Programs for the examples in spec (i32[n, SPEC]): from all masks, fix the surest token at each of
-# PROGRAM steps. heat adds Gumbel noise to the scores (0: always the likeliest token; 1: samples).
-# pads_last: fix the program's words before the padding after it. The model is surest of padding, so
-# otherwise it settles the program's length first and its words last. (For the likeliest program it
-# is a little better this way, and nicer to watch; samples written this way are often too long.)
-# Returns the programs, i32[n, PROGRAM], and the steps, i32[PROGRAM, n, PROGRAM], to watch.
+# Fill in the hidden tokens of programs: seq is i32[n, SEQ], the examples and then a program in which
+# some (or all) tokens are MASK. At each step the token the model is surest of is fixed, until none is
+# hidden. noise: uniform numbers in (0, 1], [n, PROGRAM, VOCAB], for sampling (heat 0: the likeliest
+# token, heat 1: a sample). pads_last: fix the program's words before the padding after it (the
+# model is surest of padding, so otherwise it settles a program's length first and its words last;
+# for the likeliest program that is a little worse, and less fun to watch).
+# Returns the programs, i32[n, PROGRAM], and every step, i32[PROGRAM, n, PROGRAM] (after the last
+# hidden token is fixed, the steps repeat the programs).
+fn fill(net, seq: i32[n, SEQ], noise, heat, pads_last = false):
+    s = copy(seq)
+    prog = copy(seq[:, SPEC:SEQ])
+    gumbel = -log(-log(noise))
+    steps: i32[PROGRAM, n, PROGRAM] = MASK
+    for step in range(PROGRAM):
+        if sum(f32(prog == MASK)) == 0:
+            steps[step] = prog
+        else:
+            scores = net(s)
+            guess = argmax(scores + heat * gumbel)
+            p = softmax(scores)
+            sure[b, i] = p[b, i, guess[b, i]] - (2.0 if pads_last and guess[b, i] == PAD else 0.0) if prog[b, i] == MASK else -9.0
+            where = argmax(sure)
+            prog[b, i] = guess[b, i] if i == where[b] and prog[b, i] == MASK else prog[b, i]
+            s[:, SPEC:SEQ] = prog
+            steps[step] = prog
+    return prog, steps
+
+# Programs for the examples in spec (i32[n, SPEC]), from all masks.
 fn write(net, spec: i32[n, SPEC], heat, pads_last = false):
     seq: i32[n, SEQ] = MASK
     seq[:, 0:SPEC] = spec
-    prog: i32[n, PROGRAM] = MASK
-    steps: i32[PROGRAM, n, PROGRAM] = MASK
-    for step in range(PROGRAM):
-        scores = net(seq)
-        u: [n, PROGRAM, VOCAB] ~ uniform(1e-6, 1)
-        guess = argmax(scores - heat * log(-log(u)))
-        p = softmax(scores)
-        sure[b, i] = p[b, i, guess[b, i]] - (2.0 if pads_last and guess[b, i] == PAD else 0.0) if prog[b, i] == MASK else -9.0
-        where = argmax(sure)
-        prog[b, i] = guess[b, i] if i == where[b] else prog[b, i]
-        seq[:, SPEC:SEQ] = prog
-        steps[step] = prog
-    return prog, steps
+    u: [n, PROGRAM, VOCAB] ~ uniform(1e-6, 1)
+    return fill(net, seq, u, heat, pads_last)

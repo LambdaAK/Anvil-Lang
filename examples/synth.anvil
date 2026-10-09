@@ -1,7 +1,7 @@
 # synth.anvil — a diffusion model that writes programs from examples.
 #
-#     python3 examples/synth/prepare.py                 600,000 tasks (once)
-#     bin/anvil run --metal examples/synth.anvil        learn (about 17 minutes on the GPU), then write
+#     python3 examples/synth/prepare.py                 1,800,000 tasks (once)
+#     bin/anvil run --metal examples/synth.anvil        learn (about 55 minutes on the GPU), then write
 #                                                       programs for 500 test tasks
 #     python3 examples/synth/evaluate.py                how many of those programs are right
 #     python3 examples/synth/write.py "[3, 1, 2] -> [1, 2, 3]" "[5, 4, 9] -> [4, 5, 9]"
@@ -20,7 +20,7 @@ const RETRAIN = 0            # 1: learn again even if synth.weights exists
 const SAVE = "synth.weights"
 const TASKS = 500            # test tasks to write programs for
 const TRIES = 8              # sampled programs for each (besides the likeliest one)
-const CHUNK = 500            # programs written at a time
+const CHUNK = 100            # programs written at a time
 
 data = npy("data/synth/train.npy")
 test = npy("data/synth/test.npy")
@@ -53,6 +53,8 @@ fn learn():
                 print("step {step:5d} of {STEPS}   loss {seen / 500:.4f}   hidden tokens right {right / 500:.1%}   ({clock() - start:.0f} s)")
                 seen = 0.0
                 right = 0.0
+            if step % 4000 == 0:
+                save(net, "synth.partial.weights")          # (a long run that is stopped keeps this much)
 
 loaded = 0.0
 if RETRAIN == 0:
