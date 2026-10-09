@@ -1,0 +1,9 @@
+# The fine-tuned model on the sentences in classify_ids.npy (classify.py writes them, 16 at a time):
+# the probability of each class, into classify_out.npy.
+use "../sentiment_model.anvil"
+
+ids = npy("../data/sst2/classify_ids.npy")
+net = Sentiment()
+found = load(net, "../sentiment.weights")
+assert found == 1, "no sentiment.weights yet: run bin/anvil run examples/sentiment.anvil first"
+save_npy(softmax(net(ids)), "../data/sst2/classify_out.npy")

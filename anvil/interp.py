@@ -267,7 +267,12 @@ class Interpreter:
         elif st.name == "load_npy":
             b = a["buf"]
             try:
-                data = np.load(a["path"], allow_pickle=False)
+                if a["kind"] & 16:                          # a tensor in the middle of a .safetensors file
+                    dt = {(0, 4): "<f4", (1, 8): "<f8", (2, 2): "<f2", (3, 4): "<i4", (4, 8): "<i8", (5, 1): "u1",
+                          (6, 1): "i1", (7, 2): "<u2", (8, 2): "<i2"}[(a["kind"] & 15, a["size"])]
+                    data = np.fromfile(a["path"], dtype=dt, count=b.numel, offset=a["offset"])
+                else:
+                    data = np.load(a["path"], allow_pickle=False)
             except (OSError, ValueError):
                 raise AnvilRuntimeError(f"cannot open data file {a['path']}")
             if data.size != b.numel:

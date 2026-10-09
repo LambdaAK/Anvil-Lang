@@ -90,6 +90,9 @@ def describe(val, name: str = "") -> str:
         return "i32 (run-time integer: a loop counter, or computed from one)"
     if isinstance(val, EVal):
         return f"{val.dtype} element (index notation)"
+    if isinstance(val, TupleVal) and val.items and all(isinstance(m, ModelInstVal) for m in val.items):
+        first = model_summary(val.items[0]).split("\n")
+        return f"{len(val.items)} × {first[0]}" + ("\n" + "\n".join(first[1:]) if len(first) > 1 else "")
     if isinstance(val, TupleVal):
         return "(" + ", ".join(describe(x) for x in val.items) + ")"
     if isinstance(val, FnVal):
@@ -126,7 +129,7 @@ def declaration_line(decl) -> str:
 
 def model_summary(inst) -> str:
     """The model's parameters with their shapes, and how many numbers they hold."""
-    from .values import ModelInstVal, TVal
+    from .values import ModelInstVal, TupleVal, TVal
     rows, total = [], 0
 
     def walk(m, prefix):
@@ -137,6 +140,9 @@ def model_summary(inst) -> str:
                 total += int(b.val.numel)
             elif isinstance(b.val, ModelInstVal):
                 walk(b.val, f"{prefix}{name}.")
+            elif isinstance(b.val, TupleVal) and b.val.items and all(isinstance(m, ModelInstVal) for m in b.val.items):
+                for k, m in enumerate(b.val.items):
+                    walk(m, f"{prefix}{name}.{k}.")
     walk(inst, "")
     head = f"{inst.decl.name.id} (model, {total:,} parameters)"
     return "\n".join([head] + rows[:24] + (["  …"] if len(rows) > 24 else []))

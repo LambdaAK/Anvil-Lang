@@ -25,6 +25,8 @@ RUNTIME_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "runtime
 VARARG_SLOTS = 32
 HEAP_MIN = 64 << 20             # tensors at least this large are allocated when the program starts
 HEAP_KINDS = ("data", "temp", "var", "grad", "scalar")
+STATIC_MAX = 1 << 30            # past this much static memory, the arena (then the largest tensors) moves to the
+                                # heap: a static segment of a few gigabytes overlaps the system's shared libraries
 PAR_MIN_WORK = 1 << 17          # loop iterations below which threading does not pay off
 PAR_CHUNK_WORK = 1 << 15        # minimum iterations per chunk
 PAR_CHUNKS = 32                 # target number of chunks (~4 per thread at 8 threads)
@@ -129,9 +131,13 @@ class ProgramGen:
         self.blobs: list = []           # (label, bytes): constant data such as .npy headers
         from .blas import prepare
         self.gemms = prepare(prog)      # large matrix products go to Accelerate (cblas_sgemm)
+        for b in prog.buffers:          # (decided afresh for each compilation)
+            b.heap = False
+            b.__dict__.pop("arena_offset", None)
         for b in prog.buffers:          # large tensors live on the heap (see ir.indirect)
             if b.root is b and b.kind in HEAP_KINDS and b.init is None and b.nbytes >= HEAP_MIN:
                 b.heap = True
+        self.arena_heap = self.limit_static(prog) if share else None
         self.library = library      # a shared library: `_anvil_entry` runs the program, and returns
         self.entry = "_anvil_entry" if library else "_main"
         self.share = share          # temporaries share memory (see arena.py)
@@ -183,6 +189,30 @@ class ProgramGen:
             self.glyph_tables[key] = (lab, [self.cstring(g) for g in glyphs] + [self.cstring("?")])
             return lab
         return lab[0]
+
+    @staticmethod
+    def limit_static(prog: ir.Program):
+        """Keep the static segment under STATIC_MAX. A large program (a 12-layer transformer, its
+        gradients and its optimizer's state) can have gigabytes of temporaries: then their arena is
+        allocated when the program starts, and each temporary is reached through a pointer into it,
+        and if that is not enough, so are the largest of the other tensors. Returns that arena's plan."""
+        early = plan(prog, {b.id for b in prog.buffers})
+        own = [b for b in prog.buffers if b.root is b and b.kind != "const" and b.kind not in ir.EXTERN_KINDS
+               and not getattr(b, "heap", False) and b.id not in early.offsets]
+        static = early.size + sum(max(16, (b.nbytes + 15) // 16 * 16) for b in own)
+        if static <= STATIC_MAX:
+            return None
+        for b in prog.buffers:
+            if b.id in early.offsets:
+                b.heap = True
+                b.arena_offset = early.offsets[b.id]
+        static -= early.size
+        for b in sorted((b for b in own if b.kind in HEAP_KINDS and b.init is None), key=lambda b: (-b.nbytes, b.id)):
+            if static <= STATIC_MAX:
+                break
+            b.heap = True
+            static -= max(16, (b.nbytes + 15) // 16 * 16)
+        return early
 
     def ckpt_table(self, bufs) -> str:
         key = tuple(b.root.id for b in bufs)
@@ -394,21 +424,30 @@ class ProgramGen:
             raise NotImplementedError(type(st).__name__)
 
     def heap_allocator(self) -> str:
-        """_anvil_alloc_heap: calloc each large tensor (pages are zero, and only touched ones cost)."""
+        """_anvil_alloc_heap: calloc each large tensor (pages are zero, and only touched ones cost), and
+        the arena of temporaries if it is on the heap (see limit_static)."""
         lines = ["// the large tensors, allocated when the program starts", "    .p2align 2", "_anvil_alloc_heap:",
                  "    stp x29, x30, [sp, #-16]!", "    mov x29, sp"]
+
+        def mov(reg, v):
+            chunks = [(v >> (16 * i)) & 0xFFFF for i in range(4)]
+            out = [f"    movz {reg}, #{chunks[0]}"]
+            out += [f"    movk {reg}, #{c}, lsl #{16 * i}" for i, c in enumerate(chunks) if i and c]
+            return out
+
         for b in sorted(self.used.values(), key=lambda b: b.id):
-            if getattr(b, "heap", False):
-                lines += ["    mov x0, #1"]
-                v = (b.nbytes + 15) // 16 * 16
-                chunks = [(v >> (16 * i)) & 0xFFFF for i in range(4)]
-                first = True
-                for i, c in enumerate(chunks):
-                    if c:
-                        lines.append(f"    {'movz' if first else 'movk'} x1, #{c}" + (f", lsl #{16 * i}" if i else ""))
-                        first = False
+            if getattr(b, "heap", False) and not hasattr(b, "arena_offset"):
+                lines += ["    mov x0, #1"] + mov("x1", (b.nbytes + 15) // 16 * 16)
                 lines += ["    bl _calloc", "    cbz x0, Lheap_fail",
                           f"    adrp x9, {self.sym(b)}@PAGE", f"    str x0, [x9, {self.sym(b)}@PAGEOFF]   // {b.name}"]
+        if self.arena_heap is not None:
+            lines += ["    mov x0, #1"] + mov("x1", self.arena_heap.size)
+            lines += ["    bl _calloc", "    cbz x0, Lheap_fail", "    // each temporary's place in the arena"]
+            for b in sorted(self.used.values(), key=lambda b: b.id):
+                if hasattr(b, "arena_offset"):
+                    lines += mov("x10", b.arena_offset)
+                    lines += ["    add x10, x0, x10", f"    adrp x9, {self.sym(b)}@PAGE",
+                              f"    str x10, [x9, {self.sym(b)}@PAGEOFF]   // {b.name}"]
         lines += ["    ldp x29, x30, [sp], #16", "    ret",
                   "Lheap_fail:", "    adrp x0, Lheap_msg@PAGE", "    add x0, x0, Lheap_msg@PAGEOFF", "    bl _puts",
                   "    mov w0, #1", "    bl _exit",
@@ -888,15 +927,20 @@ class ProgramGen:
                 out.append(f"    .quad {prof_names[i]}, 0, 0")
         out.append("")
         out.append("// tensors (zero-initialized, statically allocated)")
-        self.arena = plan(self.prog, set(self.used)) if self.share else Plan({}, 0, 0)
+        if self.arena_heap is not None:         # the temporaries are in an arena on the heap (limit_static)
+            self.arena = Plan({}, 0, 0)
+        else:
+            self.arena = plan(self.prog, set(self.used)) if self.share else Plan({}, 0, 0)
         total = self.arena.size
         shared = []
         for b in sorted(self.used.values(), key=lambda b: b.id):
             if b.kind == "const":
                 continue
             if getattr(b, "heap", False):
+                where = (f"at {b.arena_offset:,} in the arena on the heap" if hasattr(b, "arena_offset") else
+                         "allocated when the program starts")
                 out.append(f".zerofill __DATA,__bss,{self.sym(b)},8,3   // {b.kind} {b.name}: {b.dtype}{list(b.shape)}, "
-                           f"allocated when the program starts ({b.nbytes:,} bytes)")
+                           f"{where} ({b.nbytes:,} bytes)")
                 continue
             if b.kind in ir.EXTERN_KINDS:
                 out.append(f"    .globl {self.sym(b)}")

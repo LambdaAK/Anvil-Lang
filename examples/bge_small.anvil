@@ -1,0 +1,65 @@
+# bge_small.anvil — BAAI/bge-small-en-v1.5, a pretrained 12-layer BERT (33 million parameters), in Anvil.
+#
+# Every weight is read from the model's own file, model.safetensors as published on Hugging Face, by
+# the name PyTorch gives it. `use "bge_small.anvil"` to build on it: examples/sentiment.anvil
+# fine-tunes it to read the sentiment of a sentence. Run python3 examples/sentiment/prepare.py first.
+
+const BGE = "data/bge-small/model.safetensors"
+const LAYERS = 12
+const D = 384                # the width of every token's vector
+const HEADS = 12
+const DH = D // HEADS        # the width of one attention head
+const FF = 1536              # the width of each layer's MLP
+const VOCAB = 30522          # WordPiece tokens
+const MAXLEN = 64            # the longest input used here (the model was trained on up to 512)
+
+fn weight(name) = safetensors(BGE, name)
+
+# a linear layer: PyTorch keeps the weight as [out, in], so it is transposed once, when it is loaded
+model Dense(name, fan_in, fan_out):
+    param W: [fan_in, fan_out] = transpose(weight(name + ".weight"))
+    param b: [fan_out] = weight(name + ".bias")
+    fn forward(x) = x @ W + b
+
+model Norm(name):
+    param g: [D] = weight(name + ".weight")
+    param b: [D] = weight(name + ".bias")
+    fn forward(x) = layer_norm(x, 1e-12) * g + b
+
+model Layer(number):
+    at = "encoder.layer.{number}."
+    q = Dense(at + "attention.self.query", D, D)
+    k = Dense(at + "attention.self.key", D, D)
+    v = Dense(at + "attention.self.value", D, D)
+    o = Dense(at + "attention.output.dense", D, D)
+    norm1 = Norm(at + "attention.output.LayerNorm")
+    up = Dense(at + "intermediate.dense", D, FF)
+    down = Dense(at + "output.dense", FF, D)
+    norm2 = Norm(at + "output.LayerNorm")
+    # skip[b, j] is -1e9 where token j is padding, so that no token attends to it
+    fn forward(x: [n, len, D], skip: [n, len], drop):
+        qs = q(x).reshape(-1, len, HEADS, DH)
+        ks = k(x).reshape(-1, len, HEADS, DH)
+        vs = v(x).reshape(-1, len, HEADS, DH)
+        s[b, h, i, j] = sum qs[b, i, h, e] * ks[b, j, h, e] / sqrt(DH) + skip[b, j]
+        p = dropout(softmax(s), drop)
+        mixed[b, i, h, e] = sum p[b, h, i, j] * vs[b, j, h, e]
+        x = norm1(x + dropout(o(mixed.reshape(-1, len, D)), drop))
+        return norm2(x + dropout(down(gelu(up(x), exact=true)), drop))
+
+model Bert:
+    param words: [VOCAB, D] = weight("embeddings.word_embeddings.weight")
+    param places: [MAXLEN, D] = weight("embeddings.position_embeddings.weight")[0:MAXLEN]
+    param segment: [D] = weight("embeddings.token_type_embeddings.weight")[0]
+    norm = Norm("embeddings.LayerNorm")
+    layers = [Layer(number) for number in range(LAYERS)]
+    # ids: token ids, padded with 0 ([PAD]); one vector for each token, [n, len, D]. drop: the dropout
+    # rate while training (0 to use the model)
+    fn forward(ids: i32[n, len], drop = 0.0):
+        skip[b, j] = 0.0 if ids[b, j] != 0 else -1e9
+        pos = places[0:len]
+        x[b, t, d] = words[ids[b, t], d] + pos[t, d] + segment[d]
+        x = dropout(norm(x), drop)
+        static for layer in layers:
+            x = layer(x, skip, drop)
+        return x

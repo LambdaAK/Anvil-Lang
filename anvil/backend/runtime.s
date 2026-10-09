@@ -732,7 +732,8 @@ Lbytes_bad:
 // void _anvil_rt_load_npy(const char *path, void *dst, int64 n, int64 offset, int64 kind, int64 size)
 // The n values of a NumPy file, from byte `offset`, converted to 32 bits: kind 0 f32, 1 f64, 2 f16
 // (to f32); 3 32-bit, 4 64-bit, 5 unsigned 8-bit, 6 signed 8-bit, 7 unsigned 16-bit, 8 signed
-// 16-bit integers (to i32). size: bytes per value in the file. The file must hold exactly n.
+// 16-bit integers (to i32). size: bytes per value in the file. The file must hold exactly n, unless
+// kind has 16 added: then the values are a slice of the file (a tensor in a .safetensors file).
     .p2align 2
 _anvil_rt_load_npy:
     stp x29, x30, [sp, #-80]!
@@ -759,7 +760,10 @@ _anvil_rt_load_npy:
     bl _malloc
     mov x26, x0
     mov x1, #1
-    add x2, x22, #1                     // one more than expected: a longer file is caught too
+    add x2, x22, #1                     // one more than expected: a longer file is caught too,
+    tst x24, #16
+    csel x2, x22, x2, ne                // unless more of the file follows the values
+    and x24, x24, #15
     mov x3, x25
     bl _fread
     mov x23, x0

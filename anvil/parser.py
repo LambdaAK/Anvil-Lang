@@ -683,6 +683,15 @@ class Parser:
             items = []
             while not self.tok.is_op("]"):
                 items.append(self.parse_expr())
+                if len(items) == 1 and self.tok.is_kw("for"):        # [Layer(i) for i in range(n)]
+                    self.next()
+                    var = self.expect_name("a loop variable")
+                    if not self.tok.is_kw("in"):
+                        raise self.error("expected `in` after the loop variable")
+                    self.next()
+                    it = self.parse_expr()
+                    end = self.expect_op("]", "to close the list")
+                    return A.ListComp(t.span.to(end.span), items[0], var, it)
                 if not self.tok.is_op(","):
                     break
                 self.next()

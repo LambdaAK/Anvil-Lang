@@ -61,6 +61,14 @@ class ListLit(Expr):
 
 
 @dataclass(repr=False)
+class ListComp(Expr):
+    """[elt for var in iter]: a list built at compile time (a tuple of values, or of models)."""
+    elt: Expr
+    var: Name
+    iter: Expr
+
+
+@dataclass(repr=False)
 class TupleLit(Expr):
     items: list[Expr]
 

@@ -9,7 +9,17 @@
 fn relu(x) = max(x, 0)
 fn leaky_relu(x, slope = 0.01) = max(x, slope * x)
 fn elu(x, alpha = 1.0) = x if x > 0 else alpha * (exp(x) - 1)
-fn gelu(x) = 0.5 * x * (1 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)))
+# the error function, to within 1.5e-7 (Abramowitz and Stegun, formula 7.1.26)
+fn erf(x):
+    t = 1 / (1 + 0.3275911 * abs(x))
+    p = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))))
+    return sign(x) * (1 - p * exp(-x * x))
+
+# exact=true is the GELU of BERT and of PyTorch's default; without it, the tanh approximation (GPT-2's)
+fn gelu(x, exact = false):
+    if exact:
+        return 0.5 * x * (1 + erf(0.7071067811865476 * x))
+    return 0.5 * x * (1 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)))
 fn silu(x) = x * sigmoid(x)
 fn softplus(x) = max(x, 0) + log(1 + exp(-abs(x)))
 
@@ -78,10 +88,10 @@ model Conv2d(c_in, c_out, k, stride = 1, pad = 0):
         return out
 
 # layer_norm with a learned scale and shift for each feature
-model LayerNorm(d):
+model LayerNorm(d, eps = 1e-5):
     param g: [d] = 1
     param b: [d]
-    fn forward(x) = layer_norm(x) * g + b
+    fn forward(x) = layer_norm(x, eps) * g + b
 
 # a learned vector for each of n ids
 model Embedding(n, d):

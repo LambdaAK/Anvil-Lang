@@ -193,14 +193,17 @@ static void anvil_load_bytes(const char *path, int *out, long n) {
     free(text);
 }
 
-// a NumPy file's n values from byte `offset`, converted to 32 bits (kinds as in _anvil_rt_load_npy)
+// a NumPy file's n values from byte `offset`, converted to 32 bits (kinds as in _anvil_rt_load_npy;
+// kind + 16: the values are a slice of the file, as a tensor in a .safetensors file)
 static void anvil_load_npy(const char *path, void *out, long n, long offset, int kind, int size) {
     path = anvil_data_path(path);
     FILE *f = fopen(path, "rb");
     if (!f) { fflush(stdout); fprintf(stderr, "anvil: cannot open data file %s\n", path); exit(1); }
     fseek(f, offset, SEEK_SET);
+    long extra = (kind & 16) ? 0 : 1;               // one more than expected catches a longer file
+    kind &= 15;
     unsigned char *raw = (unsigned char *)malloc((size_t)n * size + 1);
-    long got = (long)fread(raw, 1, (size_t)n * size + 1, f);
+    long got = (long)fread(raw, 1, (size_t)n * size + extra, f);
     fclose(f);
     if (got != n * size) { fflush(stdout); fprintf(stderr, "anvil: data file %s does not have the shape this program was compiled for\n", path); exit(1); }
     for (long i = 0; i < n; i++) {

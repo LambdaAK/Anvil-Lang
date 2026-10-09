@@ -1,0 +1,74 @@
+# sentiment.anvil — a pretrained transformer, fine-tuned to tell positive sentences from negative ones.
+#
+#     python3 examples/sentiment/prepare.py              find the model, tokenize SST-2 (once)
+#     bin/anvil run examples/sentiment.anvil             fine-tune, then save examples/sentiment.weights
+#     python3 examples/sentiment/classify.py "a gorgeous, witty, seductive movie"
+#
+# The model is BAAI/bge-small-en-v1.5 (bge_small.anvil), a 12-layer BERT that has read a great deal of
+# English, with one new layer on top that reads the vector of the first token ([CLS]) and gives two
+# scores, negative and positive (sentiment_model.anvil). The data is SST-2, the Stanford Sentiment
+# Treebank as in the GLUE benchmark: 67,349 phrases and sentences from film reviews to learn from, and
+# 872 sentences to test on.
+#
+# Sentences are short (most are under 16 tokens), so they come in three files by length, padded to
+# 16, 32 and 64 tokens. The training loop is written once and compiled for each length; the three
+# share one Adam, as all `minimize` statements with the same optimizer and parameters do.
+
+use "sentiment_model.anvil"
+
+const EPOCHS = 2
+const BATCH = 32
+const LR = 5e-5              # the peak learning rate; it warms up over the first 6% of steps, then decays
+const DROP = 0.1             # dropout while training, as BERT was trained
+const RETRAIN = 0            # 1: fine-tune again even if sentiment.weights exists
+const SAVE = "sentiment.weights"
+
+X16 = npy("data/sst2/train16_ids.npy")
+Y16 = npy("data/sst2/train16_labels.npy")
+X32 = npy("data/sst2/train32_ids.npy")
+Y32 = npy("data/sst2/train32_labels.npy")
+X64 = npy("data/sst2/train64_ids.npy")
+Y64 = npy("data/sst2/train64_labels.npy")
+X_dev = npy("data/sst2/dev_ids.npy")
+Y_dev = npy("data/sst2/dev_labels.npy")
+
+net = Sentiment()
+
+const PER_EPOCH = len(Y16) // BATCH + len(Y32) // BATCH + len(Y64) // BATCH
+const STEPS = EPOCHS * PER_EPOCH
+
+fn dev_accuracy():
+    right = 0.0
+    for k in range(8):                            # 872 sentences, 109 at a time
+        x[n, t] = X_dev[k * 109 + n, t] where n < 109
+        right = right + accuracy(net(x), Y_dev[k * 109 : k * 109 + 109])
+    return right / 8
+
+fn fine_tune():
+    step = 0
+    seen = 0.0
+    start = clock()
+    for epoch in range(EPOCHS):
+        static for data in ((X16, Y16), (X32, Y32), (X64, Y64)):
+            X, Y = data
+            for x, y in batches(X, Y, size=BATCH, shuffle=true):
+                loss = cross_entropy(net(x, DROP), y)
+                minimize loss with adam(lr=warmup_cosine(step, STEPS, LR, STEPS * 6 // 100), clip_norm=1.0)
+                step += 1
+                seen = seen + loss
+                if step % 400 == 0:
+                    print("step {step:5d} of {STEPS}   loss {seen / 400:.4f}   ({clock() - start:.0f} s)")
+                    seen = 0.0
+        print("epoch {epoch + 1}   dev accuracy {dev_accuracy():.2%}   ({clock() - start:.0f} s)")
+
+print("BAAI/bge-small-en-v1.5 in Anvil: 12 layers, {D} wide, 33 million parameters")
+loaded = 0.0
+if RETRAIN == 0:
+    loaded = load(net, SAVE)
+if loaded > 0:
+    print("(fine-tuned weights from an earlier run, in {SAVE}: --set RETRAIN=1 to train again)")
+else:
+    print("before fine-tuning: dev accuracy {dev_accuracy():.2%} (a new layer on top, still random)")
+    fine_tune()
+    save(net, SAVE)
+print("SST-2 dev accuracy: {dev_accuracy():.2%}")

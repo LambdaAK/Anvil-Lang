@@ -389,12 +389,14 @@ def clip_gradients(elab, spec, params, grads, span) -> dict:
         raise AnvilError("clip_norm must be a constant", span)
     if clip.value <= 0:
         return {}
-    total = None
+    parts = []
     for p in params:
         g = TVal.of(grads[p.root].buf)
-        sq = elab.reduce_tensor("sum", elab.binary_op("mul", g, g, span), None, False, span)
-        total = sq if total is None else elab.binary_op("add", total, sq, span)
-    norm = elab.unary_op("sqrt", total, span)
+        parts.append(elab.reduce_tensor("sum", elab.binary_op("mul", g, g, span), None, False, span))
+    while len(parts) > 1:              # added in pairs: a 12-layer transformer has ~200 parameters, and a
+        parts = [elab.binary_op("add", parts[i], parts[i + 1], span) if i + 1 < len(parts) else parts[i]
+                 for i in range(0, len(parts), 2)]       # chain that long is too deep for the code generators
+    norm = elab.unary_op("sqrt", parts[0], span)
     scale = elab.binary_op("min", CVal(1.0), elab.binary_op("div", CVal(float(clip.value)),
                                                             elab.binary_op("add", norm, CVal(1e-6), span), span), span)
     out = {}
@@ -417,8 +419,8 @@ def minimize(elab, s: A.Minimize):
         targets = []
         for o in s.over:
             v = elab.eval_top(o)
-            if isinstance(v, ModelInstVal):
-                targets.extend(elab.model_params(v))
+            if elab.params_of(v) is not None:
+                targets.extend(elab.params_of(v))
             elif isinstance(v, TVal) and v.buf.kind == "param":
                 targets.append(v.buf)
             else:
@@ -448,8 +450,14 @@ def minimize(elab, s: A.Minimize):
     opt_name = decl.name.id
     step_params = [n.id for n in decl.step_params]
     t_val = None
+    # the optimizer's state belongs to the parameters: two `minimize` statements with the same optimizer on
+    # the same parameters (say, over batches of different shapes) continue one Adam, as with one PyTorch optimizer
+    shared = elab.__dict__.setdefault("optimizer_state", {})
     if len(step_params) == 3:
-        t_buf = elab.new_buffer(f"{opt_name}{site}.t", (), I32, "state")
+        key = (opt_name, frozenset(id(p) for p in params))
+        if key not in shared:
+            shared[key] = elab.new_buffer(f"{opt_name}{site}.t", (), I32, "state")
+        t_buf = shared[key]
         elab.write_buffer(t_buf, elab.binary_op("add", TVal.of(t_buf), CVal(1), span), span, fresh=True)
         t_val = AffVal(Affine.of(ScalarRef(t_buf)))
     clipped = clip_gradients(elab, spec, params, grads, span)
@@ -465,7 +473,10 @@ def minimize(elab, s: A.Minimize):
             if t_val is not None:
                 scope.vars[step_params[2]] = Binding(t_val, what="step count")
             for st_name in decl.state:
-                sb = elab.new_buffer(f"{p.name}.{st_name.id}", p.shape, F32, "state")
+                key = (opt_name, id(p), st_name.id)
+                if key not in shared:
+                    shared[key] = elab.new_buffer(f"{p.name}.{st_name.id}", p.shape, F32, "state")
+                sb = shared[key]
                 scope.vars[st_name.id] = Binding(TVal.of(sb), ref=sb, what="state")
             from .elaborate import compute_runtime_names
             scope.runtime_names = compute_runtime_names(decl.step_body)

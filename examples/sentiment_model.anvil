@@ -1,0 +1,12 @@
+# sentiment_model.anvil — BAAI/bge-small-en-v1.5 (bge_small.anvil) with a new layer on top that reads
+# the vector of the first token, [CLS], and scores the sentence: negative, positive. sentiment.anvil
+# fine-tunes it; sentiment/classify.anvil uses it.
+use "bge_small.anvil"
+
+model Sentiment:
+    bert = Bert()
+    param W: [D, 2] ~ normal(0, 0.02)
+    param c: [2]
+    fn forward(ids, drop = 0.0):
+        first = bert(ids, drop)[:, 0, :]          # the vector of [CLS], the first token
+        return dropout(first, drop) @ W + c

@@ -28,6 +28,10 @@ from .values import (AffVal, BatchesVal, Binding, BuiltinVal, CVal, EVal, FStrVa
 
 
 
+def is_model_list(v) -> bool:
+    return isinstance(v, TupleVal) and bool(v.items) and all(isinstance(m, ModelInstVal) for m in v.items)
+
+
 def set_extent(v, n):
     """An index variable's range: the number for code generation, and its name if it has one."""
     v.extent = int(n)
@@ -392,6 +396,13 @@ class Elaborator(OpsMixin, BuiltinsMixin):
                     inst = self.instantiate(f, s.value, self.scope.prefix + tgt.id)
                     self.scope.vars[tgt.id] = Binding(inst, what="model instance", span=s.span)
                     return
+            if isinstance(s.value, A.ListComp):              # layers = [Layer(i) for i in range(n)]
+                val = self.list_comp(s.value, model_list=tgt.id)
+                if val.items and all(isinstance(x, ModelInstVal) for x in val.items):
+                    self.scope.vars[tgt.id] = Binding(val, what="model instance", span=s.span)
+                    return
+                self.assign(tgt.id, val, s.value.span, fresh=True)
+                return
             nk = len(self.block.stmts)
             val = self.eval_top(s.value)
             self.assign(tgt.id, val, s.value.span, fresh=self.fresh_since(nk, s.value))
@@ -1012,21 +1023,7 @@ class Elaborator(OpsMixin, BuiltinsMixin):
         names = [t.id for t in s.targets]
         if len(names) != 1:
             raise AnvilError("a `static for` takes one loop variable", s.span)
-        if isinstance(it, RangeVal):
-            bounds = []
-            for b in (it.start, it.stop):
-                if not isinstance(b, CVal) or not b.is_int:
-                    raise AnvilError("a `static for` needs a range known at compile time", s.iter.span,
-                                   help="use a plain `for` for a loop whose length is only known when it runs")
-                bounds.append(int(b.value))
-            values = [CVal(v) for v in range(bounds[0], bounds[1], it.step)]
-        elif isinstance(it, TupleVal):
-            values = list(it.items)
-        elif isinstance(it, TVal) and it.rank > 0:
-            rest = [("slice", None, None, None, s.iter.span)] * (it.rank - 1)
-            values = [self.subscript_value(it, [CVal(k)] + rest, s.iter.span) for k in range(it.shape[0])]
-        else:
-            raise AnvilError(f"a `static for` loops over a range, a tuple or a tensor, not {describe(it)}", s.iter.span)
+        values = self.unrolled_values(it, s.iter.span, "a `static for`")
         if len(values) > 1000:
             raise AnvilError(f"a `static for` of {len(values)} steps is too long to unroll", s.iter.span)
         self.static_marks.append(len(self.loops))
@@ -1038,6 +1035,48 @@ class Elaborator(OpsMixin, BuiltinsMixin):
                 self.exec_block(s.body)
         finally:
             self.static_marks.pop()
+
+    def unrolled_values(self, it: Val, span, what: str) -> list:
+        """The values a `static for` or a list comprehension goes through, all known at compile time."""
+        if isinstance(it, RangeVal):
+            bounds = []
+            for b in (it.start, it.stop):
+                if not isinstance(b, CVal) or not b.is_int:
+                    raise AnvilError(f"{what} needs a range known at compile time", span,
+                                   help="use a plain `for` for a loop whose length is only known when it runs")
+                bounds.append(int(b.value))
+            return [CVal(v) for v in range(bounds[0], bounds[1], it.step)]
+        if isinstance(it, TupleVal):
+            return list(it.items)
+        if isinstance(it, TVal) and it.rank > 0:
+            rest = [("slice", None, None, None, span)] * (it.rank - 1)
+            return [self.subscript_value(it, [CVal(k)] + rest, span) for k in range(it.shape[0])]
+        raise AnvilError(f"{what} loops over a range, a tuple or a tensor, not {describe(it)}", span)
+
+    def list_comp(self, n: A.ListComp, model_list: str | None = None) -> TupleVal:
+        """[elt for var in iter]. With model_list, the models it creates are named `model_list.0`, `.1`, ..."""
+        values = self.unrolled_values(self.eval(n.iter), n.iter.span, "a list comprehension")
+        if len(values) > 1000:
+            raise AnvilError(f"a list comprehension of {len(values)} items is too long", n.iter.span)
+        saved = self.scope.vars.get(n.var.id)
+        out = []
+        try:
+            for k, v in enumerate(values):
+                self.scope.vars[n.var.id] = Binding(v, what="loop variable")
+                f = self.try_eval_callee(n.elt.func) if isinstance(n.elt, A.Call) else None
+                if isinstance(f, ModelDefVal):
+                    out.append(self.instantiate(f, n.elt, f"{self.scope.prefix}{model_list or 'models'}.{k}"))
+                else:
+                    out.append(self.eval(n.elt))
+        finally:
+            if saved is None:
+                self.scope.vars.pop(n.var.id, None)
+            else:
+                self.scope.vars[n.var.id] = saved
+        return TupleVal(out)
+
+    def ev_ListComp(self, n: A.ListComp):
+        return self.list_comp(n)
 
     def st_For(self, s: A.For):
         if s.static:
@@ -1269,6 +1308,12 @@ class Elaborator(OpsMixin, BuiltinsMixin):
                 parts.append(p)
             else:
                 parts.append((self.eval(p.expr), p.spec, p.span))
+        # only strings and integers known at compile time: the text is known too ("encoder.layer.{k}.")
+        if all(isinstance(p, str) or isinstance(p[0], SVal) and not p[1]
+               or isinstance(p[0], CVal) and p[0].is_int and not isinstance(p[0].value, bool)
+               and (not p[1] or p[1].endswith("d")) for p in parts):
+            return SVal("".join(p if isinstance(p, str) else p[0].value if isinstance(p[0], SVal)
+                                else format(int(p[0].value), p[1] or "d") for p in parts))
         return FStrVal(parts)
 
     def ev_TupleLit(self, n: A.TupleLit):
@@ -1662,7 +1707,18 @@ class Elaborator(OpsMixin, BuiltinsMixin):
                 out.append(b.ref)
             elif isinstance(b.val, ModelInstVal) and b.val is not inst:
                 out.extend(self.model_params(b.val))
+            elif is_model_list(b.val):
+                for m in b.val.items:
+                    out.extend(self.model_params(m))
         return out
+
+    def params_of(self, v: Val) -> list[Buffer] | None:
+        """The parameters of a model or of a list of models; None for anything else."""
+        if isinstance(v, ModelInstVal):
+            return self.model_params(v)
+        if is_model_list(v):
+            return [b for m in v.items for b in self.model_params(m)]
+        return None
 
     # ------------------------------------------------------------------ optimizers
     def optimizer_spec(self, f: OptDefVal, args, kwargs, node) -> OptSpecVal:

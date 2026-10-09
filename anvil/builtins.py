@@ -25,7 +25,7 @@ BUILTINS = set(UNARY_MATH) | {
     "zeros", "ones", "full", "arange", "eye", "linspace", "randn", "rand", "reshape", "flatten",
     "transpose", "len", "copy", "print", "range", "batches", "idx", "seed", "clock", "grad",
     "normal", "uniform", "bernoulli", "randint", "shape", "float", "int", "show", "sleep", "nonzero", "stack",
-    "input", "save", "load", "csv", "bytes", "decode", "npy", "save_npy",
+    "input", "save", "load", "csv", "bytes", "decode", "npy", "save_npy", "safetensors",
 }
 
 CSV_NUMBER = re.compile(r"\s*[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?\s*")   # what a csv field may hold
@@ -62,6 +62,28 @@ def npy_header(descr: str, shape) -> bytes:
     pad = 64 - (10 + len(text) + 1) % 64
     text = text + " " * (pad % 64) + "\n"
     return b"\x93NUMPY\x01\x00" + len(text).to_bytes(2, "little") + text.encode("latin1")
+
+
+# safetensors element types, as the NumPy codes of NPY_KINDS
+SAFETENSORS_TYPES = {"F32": "f4", "F64": "f8", "F16": "f2", "I32": "i4", "U32": "u4", "I64": "i8", "U64": "u8",
+                     "I16": "i2", "U16": "u2", "I8": "i1", "U8": "u1", "BOOL": "b1"}
+
+
+def read_safetensors_header(path: str) -> dict:
+    """{tensor name: (dtype, shape, offset of its data in the file)} of a .safetensors file."""
+    import json
+    with open(path, "rb") as f:
+        n = int.from_bytes(f.read(8), "little")
+        if not 2 <= n <= (100 << 20):
+            raise ValueError("not a safetensors file")
+        header = json.loads(f.read(n).decode("utf-8"))
+    out = {}
+    for name, info in header.items():
+        if name == "__metadata__":
+            continue
+        start, end = info["data_offsets"]
+        out[name] = (info["dtype"], tuple(int(x) for x in info["shape"]), 8 + n + start, end - start)
+    return out
 
 
 def read_idx_header(path: str):
@@ -135,6 +157,15 @@ class BuiltinsMixin:
         if fn is None:
             raise AnvilError(f"`{name}` cannot be called this way", node.span)
         return fn(args, kwargs, node)
+
+    def data_dir(self, node) -> str:
+        """Where a file name in a call is relative to: the .anvil file the call is written in (a file
+        brought in with `use` reads its own data files), else the program's file, else here."""
+        f = getattr(getattr(node, "span", None), "file", None)
+        path = getattr(f, "path", "")
+        if path and not path.startswith("<") and os.path.basename(path) != "prelude.anvil" and os.path.exists(path):
+            return os.path.dirname(os.path.abspath(path))
+        return self.source.dir if self.source is not None else os.getcwd()
 
     def expect_args(self, name, args, kwargs, node, n_min, n_max=None, allowed_kw=()):
         n_max = n_min if n_max is None else n_max
@@ -433,7 +464,7 @@ class BuiltinsMixin:
         p = args[0]
         if not isinstance(p, SVal):
             raise AnvilError("`idx` takes a file path string", node.span)
-        base = self.source.dir if self.source is not None else os.getcwd()
+        base = self.data_dir(node)
         path = os.path.normpath(os.path.join(base, os.path.expanduser(p.value)))
         if not os.path.exists(path):
             raise AnvilError(f"data file not found: {path}", node.span,
@@ -459,7 +490,7 @@ class BuiltinsMixin:
         p = args[0]
         if not isinstance(p, SVal):
             raise AnvilError("`npy` takes a file path string", node.span)
-        base = self.source.dir if self.source is not None else os.getcwd()
+        base = self.data_dir(node)
         path = os.path.normpath(os.path.join(base, os.path.expanduser(p.value)))
         if not os.path.exists(path):
             raise AnvilError(f"data file not found: {path}", node.span, help="paths are relative to the .anvil file")
@@ -484,6 +515,49 @@ class BuiltinsMixin:
         self.last_loaded = buf
         return TVal.of(buf)
 
+    def bi_safetensors(self, args, kwargs, node):
+        """safetensors("model.safetensors", "encoder.layer.0.attention.self.query.weight"): one tensor of a
+        safetensors file (the format of Hugging Face models). Like `npy`, its shape comes from the file when
+        the program is compiled, and the numbers are read when it runs."""
+        self.expect_args("safetensors", args, kwargs, node, 2)
+        p, key = args
+        if not isinstance(p, SVal) or not isinstance(key, SVal):
+            raise AnvilError("`safetensors` takes a file path and a tensor name", node.span,
+                           help='e.g. `safetensors("model.safetensors", "embeddings.word_embeddings.weight")`')
+        base = self.data_dir(node)
+        path = os.path.normpath(os.path.join(base, os.path.expanduser(p.value)))
+        if not os.path.exists(path):
+            raise AnvilError(f"model file not found: {path}", node.span, help="paths are relative to the .anvil file")
+        cache = self.__dict__.setdefault("_safetensors_headers", {})
+        if path not in cache:
+            try:
+                cache[path] = read_safetensors_header(path)
+            except (OSError, ValueError, KeyError) as e:
+                raise AnvilError(f"cannot read {os.path.basename(path)} as a safetensors file: {e}", node.span)
+        tensors = cache[path]
+        if key.value not in tensors:
+            import difflib
+            close = difflib.get_close_matches(key.value, list(tensors), n=1, cutoff=0.6)
+            raise AnvilError(f"{os.path.basename(path)} has no tensor `{key.value}`", node.span,
+                           help=f"did you mean `{close[0]}`?" if close else f"it has {len(tensors)} tensors")
+        st_dtype, shape, offset, nbytes = tensors[key.value]
+        descr = SAFETENSORS_TYPES.get(st_dtype)
+        if descr is None:
+            raise AnvilError(f"`{key.value}` holds {st_dtype} values, which Anvil cannot read", node.span,
+                           help="convert the model to float32 or float16 first")
+        kind = NPY_KINDS[descr]
+        n = 1
+        for d in shape:
+            n *= d
+        if n * kind[1] != nbytes:
+            raise AnvilError(f"`{key.value}` in {os.path.basename(path)} has {nbytes} bytes, not {n * kind[1]}", node.span)
+        dtype = I32 if descr[0] in "iub" else F32
+        buf = self.new_buffer(key.value.replace(".", "_"), shape, dtype, "data", span=node.span)
+        self.emit(ir.RTCall("load_npy", {"buf": buf, "path": path, "offset": offset, "kind": kind[0] | 16,
+                                         "size": kind[1]}, span=node.span))
+        self.last_loaded = buf
+        return TVal.of(buf)
+
     def bi_save_npy(self, args, kwargs, node):
         """save_npy(x, "x.npy"): write a tensor as a NumPy file (np.load reads it back)."""
         self.expect_args("save_npy", args, kwargs, node, 2)
@@ -496,7 +570,7 @@ class BuiltinsMixin:
             raise AnvilError(f"`save_npy` writes a tensor, not {describe_kind(x)}", node.span)
         if not x.is_identity():
             x = self.materialize(x, node.span)
-        base = self.source.dir if self.source is not None else os.getcwd()
+        base = self.data_dir(node)
         path = os.path.normpath(os.path.join(base, os.path.expanduser(p.value)))
         header = npy_header("<i4" if x.dtype == I32 else "<f4", x.shape)
         self.emit(ir.RTCall("save_npy", {"buf": x.buf, "path": path, "header": header}, span=node.span))
@@ -507,10 +581,10 @@ class BuiltinsMixin:
         x, p = args
         if not isinstance(p, SVal):
             raise AnvilError(f"the second argument of `{name}` is a file name", node.span)
-        base = self.source.dir if self.source is not None else os.getcwd()
+        base = self.data_dir(node)
         path = os.path.normpath(os.path.join(base, os.path.expanduser(p.value)))
-        if isinstance(x, ModelInstVal):
-            bufs = self.model_params(x)
+        if self.params_of(x) is not None:
+            bufs = self.params_of(x)
         elif isinstance(x, TVal) and x.buf.kind == "param" and x.is_identity():
             bufs = [x.buf]
         else:
@@ -542,7 +616,7 @@ class BuiltinsMixin:
         if not isinstance(p, SVal):
             raise AnvilError("`csv` takes a file path string", node.span)
         sep = kwargs["sep"].value if "sep" in kwargs and isinstance(kwargs["sep"], SVal) else ","
-        base = self.source.dir if self.source is not None else os.getcwd()
+        base = self.data_dir(node)
         path = os.path.normpath(os.path.join(base, os.path.expanduser(p.value)))
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
@@ -585,7 +659,7 @@ class BuiltinsMixin:
         p = args[0]
         if not isinstance(p, SVal):
             raise AnvilError("`bytes` takes a file path string", node.span)
-        base = self.source.dir if self.source is not None else os.getcwd()
+        base = self.data_dir(node)
         path = os.path.normpath(os.path.join(base, os.path.expanduser(p.value)))
         if not os.path.isfile(path):
             raise AnvilError(f"data file not found: {path}", node.span, help="paths are relative to the .anvil file")
@@ -842,8 +916,8 @@ class BuiltinsMixin:
         from .autodiff import grad
         targets = []
         for a, an in zip(args[1:], node.args[1:]):
-            if isinstance(a, ModelInstVal):
-                targets.extend(TVal.of(b) for b in self.model_params(a))
+            if self.params_of(a) is not None:
+                targets.extend(TVal.of(b) for b in self.params_of(a))
             elif isinstance(a, TVal):
                 targets.append((a, an))
             else:

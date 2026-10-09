@@ -1,0 +1,10 @@
+# The clone, on the first 16 sentences of SST-2's dev set: its vectors, for check_clone.py to compare
+# with PyTorch's.
+use "../bge_small.anvil"
+
+ids = npy("../data/sst2/dev_ids.npy")
+bert = Bert()
+start = clock()
+h = bert(ids[0:16])
+print("12 layers, 16 sentences of 64 tokens: {(clock() - start) * 1000:.1f} ms")
+save_npy(h, "../data/sst2/clone_hidden.npy")

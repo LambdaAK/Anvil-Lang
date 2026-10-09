@@ -333,9 +333,18 @@ net = MLP()          # params are named net.l1.W, net.l1.b, ...
 ```
 
 The prelude also has `Conv2d(c_in, c_out, k, stride=1, pad=0)`, `max_pool2d(x, s=2)`,
-`LayerNorm(d)` and `Embedding(n, d)`.
+`LayerNorm(d, eps=1e-5)` and `Embedding(n, d)`.
+
+A list comprehension builds a list at compile time. A list of models is a stack of layers, named
+the way PyTorch's `ModuleList` names them:
 
 ```python
+model Encoder(n):
+    layers = [Layer(k) for k in range(n)]            # params layers.0.q.W, layers.1.q.W, ...
+    fn forward(x):
+        static for layer in layers:
+            x = layer(x)
+        return x
 ```
 
 ### Training
@@ -350,6 +359,10 @@ maximize elbo with adam()
 dW, db = grad(loss, W, b)                           # gradients with respect to any tensors
 h = detach(h)                                       # stop-gradient
 ```
+
+An optimizer's state belongs to the parameters: two `minimize` statements with the same optimizer
+on the same parameters (say, one for each length of input) continue one Adam, as one PyTorch
+optimizer would.
 
 Optimizers are plain Anvil:
 
@@ -376,6 +389,7 @@ images = idx("train-images-idx3-ubyte.gz")  # IDX/MNIST loader (gzip or raw)
 table = csv("iris.csv")                      # f32[rows, cols]; the shape is read at compile time
 text = bytes("README.md")                    # i32[n], one element per byte
 W1 = npy("w1.npy")                           # a NumPy file (from np.save, or PyTorch's .numpy())
+Wq = safetensors("model.safetensors", "encoder.layer.0.attention.self.query.weight")   # by name
 save_npy(probs, "probs.npy")                 # … and back: np.load reads it
 save(net, "net.weights")                     # a checkpoint of the parameters, next to the program
 if load(net, "net.weights") == 0: ...        # 0: no such file (or other sizes), nothing changed
@@ -399,7 +413,10 @@ assert loss == loss, "loss is nan at step {step}"           # (nan ≠ nan) chec
 k = input("your move: ")                                    # the first number on the line (or nan)
 ```
 
-`use "model.anvil"` brings in another file's functions, models, optimizers and constants.
+`use "model.anvil"` brings in another file's functions, models, optimizers and constants. File
+names are relative to the `.anvil` file that names them, so a file brought in with `use` finds its
+own data. `safetensors` reads the format Hugging Face publishes models in: like `npy`, a tensor's
+shape is read when the program compiles, and its numbers when it runs.
 
 Unicode is optional: `Σ` for `sum`, `∇` for `grad`, `√x`, `→`, `≤ ≥ ≠`, `∞`, and Greek identifiers such as `θ` and `η`.
 
@@ -656,8 +673,9 @@ generating code: about 50 ms for MNIST.
 | [`letters.anvil`](examples/letters.anvil) | a CNN for handwritten letters and digits (EMNIST's 62 classes, 698,000 images), saved for `bin/draw --text` | 86.9% after 3 epochs (2 min) |
 | [`diffusion.anvil`](examples/diffusion.anvil) | a denoising diffusion model (DDPM) with classifier-free guidance; draws each digit 0–9 on request | 20 epochs in 44 s |
 | [`checkers.anvil`](examples/checkers.anvil) | checkers learned by self-play (TD learning) plus look-ahead search; play it with `bin/checkers` | beats a greedy player 94–6–0 after 4,000 games (14 s) |
-| [`named_dims.anvil`](examples/named_dims.anvil) | MNIST read row by row with attention; three classic shape bugs behind `--set BUG=1` (2, 3) that train silently with plain numbers and do not compile with names | 93.0% after 3 epochs (2 s) |
+| [`named_dims.anvil`](examples/named_dims.anvil) | MNIST read row by row with attention; three classic shape bugs behind `--set BUG=1` (2, 3) that train silently with plain numbers and do not compile with names | 92.9% after 3 epochs (1.5 s) |
 | [`dream.anvil`](examples/dream.anvil) | gradients with respect to the input: the digit network's dreams of each digit, and real digits changed by at most 0.2 per pixel until it misreads all ten | 100% fooled, in under a second |
+| [`sentiment.anvil`](examples/sentiment.anvil) | a pretrained 12-layer BERT ([`bge_small.anvil`](examples/bge_small.anvil), weights read from its Hugging Face file) fine-tuned to read the sentiment of a sentence (SST-2) | 91.97% after 2 epochs (9 min) |
 
 ### Reinforcement learning: Snake
 
@@ -733,6 +751,69 @@ It trains in about 10 seconds. For the first 600 steps the loss sits at about 3.
 which is roughly what predicting each byte from the one before it gives. Then attention starts to
 pay off and the loss falls to about 1 bit per byte on the current 38 KB README (0.6 on the 25 KB
 version).
+
+### A pretrained transformer: sentiment
+
+[`examples/bge_small.anvil`](examples/bge_small.anvil) is
+[BAAI/bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5), a pretrained 12-layer BERT
+with 33 million parameters, written out in about 60 lines of Anvil. Every weight comes from the
+model's own `model.safetensors`, by the name PyTorch gives it:
+
+```python
+model Layer(number):
+    at = "encoder.layer.{number}."
+    q = Dense(at + "attention.self.query", D, D)
+    ...
+model Bert:
+    param words: [VOCAB, D] = weight("embeddings.word_embeddings.weight")
+    layers = [Layer(number) for number in range(LAYERS)]
+```
+
+After all 12 layers, its vector for every token of 16 test sentences is within 3.2·10⁻⁶ of
+PyTorch's ([`check_clone.py`](examples/sentiment/check_clone.py), against
+[`reference.py`](examples/sentiment/reference.py), Hugging Face's `BertModel` in plain PyTorch).
+
+[`examples/sentiment.anvil`](examples/sentiment.anvil) puts one new layer on top, reading the
+first token's vector, and fine-tunes the whole model on SST-2 (the Stanford Sentiment Treebank, as
+in GLUE: 67,349 phrases from film reviews, labeled positive or negative):
+
+```bash
+python3 examples/sentiment/prepare.py     # link the model from the Hugging Face cache, tokenize SST-2
+bin/anvil run examples/sentiment.anvil     # fine-tune, and save examples/sentiment.weights
+python3 examples/sentiment/classify.py "not bad at all" "this was not good"
+```
+
+```
+epoch 1   dev accuracy 91.63%   (270 s)
+epoch 2   dev accuracy 91.97%   (536 s)
+
+  positive  99.6%   not bad at all
+  negative  99.5%   this was not good
+```
+
+prepare.py needs SST-2 in `examples/data/sst2`
+([SST-2.zip](https://dl.fbaipublicfiles.com/glue/data/SST-2.zip), 7.4 MB), and the model in the
+Hugging Face cache (`huggingface-cli download BAAI/bge-small-en-v1.5`). The tokenizer is BERT's
+WordPiece in plain Python ([`tokenizer.py`](examples/sentiment/tokenizer.py)). Most sentences are
+short, so they come in three files, padded to 16, 32 and 64 tokens; the training loop is written
+once, compiled for each length, and the three share one Adam.
+
+The same fine-tuning in PyTorch 2.14 ([`torch_finetune.py`](examples/sentiment/torch_finetune.py):
+the same model, data, batches, schedule and dropout), in milliseconds per step of 32 sentences on
+an M3 Max:
+
+| tokens | Anvil, CPU | PyTorch, CPU | Anvil, Metal | PyTorch, MPS |
+|---|---|---|---|---|
+| 16 | 98 | 201 | 38 | 81 |
+| 32 | 167 | 294 | 58 | 88 |
+| 64 | 310 | 530 | 94 | 110 |
+| an epoch | 263 s | 504 s | 96 s | 176 s |
+
+PyTorch's CPU times are at its best thread count (8; 12, its default, is 3–9% slower). The Metal
+times come from a program of just these training steps, which takes about five minutes to compile.
+(Without dropout, Metal's loss after those 105 steps equals the CPU's to six digits.) The whole of
+sentiment.anvil does not build for Metal yet: clang crashes on the 36 MB of host code generated for
+it.
 
 ### Draw a digit
 
@@ -1002,7 +1083,7 @@ convolutions.
 python3 -m pytest tests
 ```
 
-There are 321 tests:
+There are 334 tests:
 - Every autodiff rule is checked against float64 finite differences.
 - Optimized programs must match unoptimized ones exactly.
 - Native code must match the NumPy reference interpreter on tricky shapes (vector tails, gathers,
@@ -1025,6 +1106,10 @@ There are 321 tests:
   match the interpreter.
 - `--check` must find the first NaN and the line that made it. `anvil export`'s libraries must
   give the same results when called from C. A real notebook with `%%anvil` cells must run.
+- Pretrained models: tensors read from a `.safetensors` file must match NumPy; lists of layers must
+  train, save and load; two `minimize` statements must continue one Adam; `erf` must match
+  `math.erf`; the command line must optimize; programs too large for a static segment must give the
+  same results with their temporaries on the heap.
 - Named dimensions: equal sizes with different names must not compile at any of the places two
   dimensions meet; the names must survive slices, reshapes, index notation and layers; hovers,
   call signatures and `anvil shapes` must show them.
@@ -1044,7 +1129,8 @@ anvil/backend/    AArch64: kernel lowering, vecmath (inline exp/log/tanh/sin/cos
                 mir (register allocation), aarch64 (program codegen), runtime.s,
                 blas (matrix products on the AMX coprocessor);
                 Metal: metal.py, anvil_metal.h; CUDA: cuda.py, anvil_cuda.h; anvil_host.h (shared)
-examples/       programs, MNIST data, examples/errors/, examples/draw/ (bin/draw)
+examples/       programs, MNIST data, examples/errors/, examples/draw/ (bin/draw),
+                examples/sentiment/ (BERT's tokenizer, SST-2 preparation, the PyTorch reference)
 benchmarks/     Anvil against NumPy (run.py → results.md); vs_pytorch/: nine projects in Anvil and
                 PyTorch, and REPORT.md
 bin/            anvil, draw, checkers
@@ -1053,6 +1139,7 @@ editors/vscode/ syntax highlighting for VS Code and Cursor
 tests/          pytest suite
 docs/PLAN.md    design document and roadmap
 docs/EPIC.md    a ranked plan of where to go next (docs/BRAINSTORM.md: the 270 ideas behind it)
+docs/index.html the website: examples, named dimensions and the benchmarks (GitHub Pages: docs/)
 ```
 
 ## Status
