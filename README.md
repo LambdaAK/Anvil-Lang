@@ -676,6 +676,7 @@ generating code: about 50 ms for MNIST.
 | [`named_dims.anvil`](examples/named_dims.anvil) | MNIST read row by row with attention; three classic shape bugs behind `--set BUG=1` (2, 3) that train silently with plain numbers and do not compile with names | 92.9% after 3 epochs (1.5 s) |
 | [`dream.anvil`](examples/dream.anvil) | gradients with respect to the input: the digit network's dreams of each digit, and real digits changed by at most 0.2 per pixel until it misreads all ten | 100% fooled, in under a second |
 | [`sentiment.anvil`](examples/sentiment.anvil) | a pretrained 12-layer BERT ([`bge_small.anvil`](examples/bge_small.anvil), weights read from its Hugging Face file) fine-tuned to read the sentiment of a sentence (SST-2) | 91.97% after 2 epochs (9 min) |
+| [`synth.anvil`](examples/synth.anvil) | a transformer that writes programs from examples by masked diffusion, then runs and edits them until they fit (`bin/synth`) | 57.6% of unseen tasks right (training: 53 min on the GPU) |
 
 ### Reinforcement learning: Snake
 
@@ -814,6 +815,56 @@ times come from a program of just these training steps, which takes about five m
 (Without dropout, Metal's loss after those 105 steps equals the CPU's to six digits.) The whole of
 sentiment.anvil does not build for Metal yet: clang crashes on the 36 MB of host code generated for
 it.
+
+### Writing programs by diffusion
+
+```bash
+bin/synth "[3, 1, 2] -> [1, 3, 6]" "[5, 0, 4, 2] -> [0, 2, 6, 11]" "[9, 9, 1] -> [1, 10, 19]"
+```
+
+```
+  x |> sort |> cumsum   ✓ 3 of 3
+  on [8, 5, 3] it gives [3, 8, 16]
+```
+
+[`examples/synth.anvil`](examples/synth.anvil) trains a transformer that writes programs from
+examples. The programs are in Pipes ([`synth/pipes.py`](examples/synth/pipes.py)), a little
+language of pipelines over a list of digits, written in Anvil's own `|>`:
+
+```
+x |> filter(odd) |> map(* 3) |> sum         [1, 2, 3, 4, 5] -> 27
+x |> drop(1) |> reverse |> take(2)          [1, 2, 3, 4] -> [4, 3]
+```
+
+Given four examples of what a program does, the model ([`synth_model.anvil`](examples/synth_model.anvil))
+writes it by masked diffusion: it starts from 24 hidden tokens and at each step fixes the one it is
+surest of, with the examples and the rest of the program in view. It learns by guessing randomly
+hidden tokens of the programs of 1.8 million random tasks (53 minutes on the GPU). `bin/synth`
+shows the writing: each word appears at its final place, in the order the model chose it.
+
+**Write, run, fix.** The model writes 64 programs, and each is run on the examples. One that gets
+some wrong is edited: a part of it (a stage, its numbers, or everything after a stage) is hidden
+again, and the model writes that part anew, seeing the rest. An edit is kept if the program gets
+closer to the examples ([`synth/search.py`](examples/synth/search.py), which calls the model through
+`anvil.function`). Masked diffusion can edit the middle of a program because it fills in hidden
+tokens anywhere; a left-to-right model can only rewrite the end. Every program it writes parses.
+
+It is tested on 500 tasks whose programs never appear in training. A program counts as right if it
+also gives the right outputs for four more examples the model did not see
+(`python3 examples/synth/evaluate.py --search 500`):
+
+| | right | per task |
+|---|---|---|
+| the model's likeliest program | 33.4% | |
+| 8 tries, the shortest that fits the examples | 49.0% | |
+| 8 tries and 8 rounds of write, run, fix | 57.6% | 0.6 s |
+| no model: every program of up to 2 stages, the shortest that fits | 75.4% | < 0.01 s |
+| no model: every program of up to 3 stages, the shortest that fits | **86.6%** | 0.02 s |
+
+For a language this small, trying every short program wins (`evaluate.py --enumerate 500 3`): Pipes
+has about 50 stages, so there are only about 100,000 programs of up to three. A model earns its
+place where there are too many programs to try, which is where this example could go next. Training
+three times as long lowered the model's loss (0.294 to 0.270) but not its score.
 
 ### Draw a digit
 
@@ -1083,7 +1134,7 @@ convolutions.
 python3 -m pytest tests
 ```
 
-There are 334 tests:
+There are 338 tests:
 - Every autodiff rule is checked against float64 finite differences.
 - Optimized programs must match unoptimized ones exactly.
 - Native code must match the NumPy reference interpreter on tricky shapes (vector tails, gathers,
@@ -1106,6 +1157,8 @@ There are 334 tests:
   match the interpreter.
 - `--check` must find the first NaN and the line that made it. `anvil export`'s libraries must
   give the same results when called from C. A real notebook with `%%anvil` cells must run.
+- The program writer: every Pipes program must survive its tokens and its text; the search must
+  give partial credit and only hide parts of programs.
 - Pretrained models: tensors read from a `.safetensors` file must match NumPy; lists of layers must
   train, save and load; two `minimize` statements must continue one Adam; `erf` must match
   `math.erf`; the command line must optimize; programs too large for a static segment must give the
@@ -1131,9 +1184,10 @@ anvil/backend/    AArch64: kernel lowering, vecmath (inline exp/log/tanh/sin/cos
                 Metal: metal.py, anvil_metal.h; CUDA: cuda.py, anvil_cuda.h; anvil_host.h (shared)
 examples/       programs, MNIST data, examples/errors/, examples/draw/ (bin/draw),
                 examples/sentiment/ (BERT's tokenizer, SST-2 preparation, the PyTorch reference)
+                examples/synth/ (Pipes, its tasks, write-run-fix search, evaluation)
 benchmarks/     Anvil against NumPy (run.py → results.md); vs_pytorch/: nine projects in Anvil and
                 PyTorch, and REPORT.md
-bin/            anvil, draw, checkers
+bin/            anvil, draw, checkers, synth
 experiments/    ablations and MNIST sweeps (run.py → results.md)
 editors/vscode/ syntax highlighting for VS Code and Cursor
 tests/          pytest suite

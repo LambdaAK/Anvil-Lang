@@ -1,0 +1,14 @@
+#!/bin/sh
+# Give examples of what a program should do to a list of digits, and watch a diffusion model written
+# in Anvil write the program (in Pipes, examples/synth/pipes.py), run it, and fix it:
+#     bin/synth "[3, 1, 2] -> [1, 3, 6]" "[5, 0, 4, 2] -> [0, 2, 6, 11]"
+#     bin/synth --test 12          a test task, with four more examples the model does not see
+# The first time, it makes the training tasks and trains the model (examples/synth.anvil, about an
+# hour on the GPU).
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [ ! -f "$DIR/examples/synth.weights" ]; then
+    echo "first, the model learns (examples/synth.anvil: about an hour on the GPU)"
+    [ -f "$DIR/examples/data/synth/train.npy" ] || python3 "$DIR/examples/synth/prepare.py" || exit 1
+    "$DIR/bin/anvil" run --metal "$DIR/examples/synth.anvil" || exit 1
+fi
+exec python3 "$DIR/examples/synth/write.py" "$@"

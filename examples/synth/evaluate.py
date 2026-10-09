@@ -99,7 +99,53 @@ def search(n: int, tries: int = 8, rounds: int = 8):
         print(f"  {what:46s} {100 * right / n:5.1f}%   ({time.time() - start:.0f} s)")
 
 
+def stages():
+    """Every stage of Pipes: (name, argument), the list stages first."""
+    out = [("map", (op, k)) for op in "+-*" for k in range(1, 5)]
+    out += [("filter", (c, k)) for c in "<>" for k in range(10)] + [("filter", "even"), ("filter", "odd")]
+    out += [("sort", None), ("reverse", None), ("cumsum", None)]
+    out += [(n, k) for n in ("take", "drop") for k in range(1, 5)]
+    return out, [(n, None) for n in P.NUMBER_STAGES]
+
+
+def enumerate_baseline(n: int, max_stages: int = 3):
+    """No model: try every program of up to max_stages stages, shortest first, and keep the first that
+    fits the four examples shown (the simplest explanation of them), as an enumerative synthesizer does."""
+    import time
+    tasks = [json.loads(line) for line in open(os.path.join(DATA, "test.jsonl"))][:n]
+    lists, numbers = stages()
+    start, right, found = time.time(), 0, 0
+    for t in tasks:
+        shown = [(xs, as_value(ys)) for xs, ys in t["examples"][:P.N_SHOWN]]
+        want = [ys for _, ys in shown]
+        level, best = [([], [xs for xs, _ in shown])], None
+        for depth in range(1, max_stages + 1):
+            nxt = []
+            for prog, vals in level:                      # programs of depth - 1 stages and their outputs
+                for st in lists + numbers:
+                    out = [P.run([st], v) if isinstance(v, list) else None for v in vals]
+                    if any(o is None for o in out):
+                        continue
+                    if out == want:
+                        best = prog + [st]
+                        break
+                    if st in lists:
+                        nxt.append((prog + [st], out))
+                if best:
+                    break
+            if best:
+                break
+            level = nxt
+        found += best is not None
+        right += best is not None and fits(best, t["examples"])
+    print(f"every program of up to {max_stages} stages, the shortest that fits: right {100 * right / n:5.1f}%"
+          f"   (one found for {100 * found / n:.1f}%; {(time.time() - start) / n:.2f} s a task)")
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--enumerate"]:
+        enumerate_baseline(int(sys.argv[2]) if len(sys.argv) > 2 else 500, int(sys.argv[3]) if len(sys.argv) > 3 else 3)
+        sys.exit()
     if sys.argv[1:2] == ["--search"]:
         search(int(sys.argv[2]) if len(sys.argv) > 2 else 200)
     else:
