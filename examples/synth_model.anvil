@@ -1,21 +1,21 @@
 # synth_model.anvil — a transformer that writes Pipes programs (examples/synth/pipes.py) by diffusion.
 #
 # The input is 80 tokens: four examples of what the program should do (input list, output), then the
-# program's 24 tokens. While it learns, a random fraction of the program's tokens are hidden ([MASK])
-# and it guesses them all at once. To write a program it starts from 24 masks and, step by step,
+# program's 36 tokens. While it learns, a random fraction of the program's tokens are hidden ([MASK])
+# and it guesses them all at once. To write a program it starts from 36 masks and, step by step,
 # fixes the token it is surest of, until none is left: masked diffusion, as in MDLM and LLaDA.
 # synth.anvil trains it; synth/write.py asks it for programs.
 
-const VOCAB = 227            # tokens: see pipes.py
+const VOCAB = 234            # tokens: see pipes.py
 const SPEC = 56              # 4 examples of 14 tokens
-const PROGRAM = 24           # program tokens
+const PROGRAM = 36           # program tokens
 const SEQ = SPEC + PROGRAM
 const PAD = 0
 const MASK = 1
 const D = 256
 const HEADS = 8
 const DH = D // HEADS
-const LAYERS = 6
+const LAYERS = 8
 
 # a pre-norm transformer block that attends both ways: every token sees the examples and the whole
 # program written so far

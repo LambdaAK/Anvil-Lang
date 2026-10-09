@@ -5,10 +5,11 @@
     python3 examples/synth/write.py --test 12          (the 12th test task, with 4 hidden examples)
 
 Inputs are lists of 3 to 6 digits; outputs are lists of up to 6 numbers, or a number, between -99
-and 99 (1 to 4 examples). The model writes 64 programs (search.py), runs them on the examples, and
-edits those that get some wrong: it hides a part of the program again and writes that part anew.
-Shown is how the simplest program that fits came about: each line a writing that got more examples
-right, ░ the tokens being written.
+and 99 (1 to 4 examples). The model writes 64 programs (search.py) and runs them on the examples; an
+exact search tries every program one change away from the closest ones, and the model edits those
+that still get some wrong, hiding a part of the program and writing that part anew. Shown is how the
+simplest program that fits came about: each line a change that got more examples right, ░ the tokens
+being written.
 """
 import json
 import os
@@ -80,20 +81,27 @@ def main():
 
     pool = S.Search(batch=64, seed=random.randrange(1 << 30)).run(examples, tries=64, rounds=12)
     best = S.first_fit(pool, len(examples))
-    before, shown = None, []
-    for entry in best.history:                      # the writings that got more examples right
-        if not shown or right(P.parse(P.decode(entry[1][-1])), examples) > right(P.parse(P.decode(shown[-1][1][-1])), examples):
-            shown.append(entry)
+    final_ids = lambda e: [int(t) for t in (e["steps"][-1] if "steps" in e else e["ids"])]
+    shown = []                                      # the changes that got more examples right
+    for e in best.history:
+        if not shown or right(P.parse(P.decode(final_ids(e))), examples) > right(P.parse(P.decode(final_ids(shown[-1]))), examples):
+            shown.append(e)
     if shown[-1] is not best.history[-1]:
         shown.append(best.history[-1])
-    for hidden_ids, steps, _ in shown:
-        final = [int(t) for t in steps[-1]]
-        if before is not None:                      # the part that is written anew, hidden
-            show(layout(before, [P.MASK if h == P.MASK else t for h, t in zip(hidden_ids, before)]), 0.5)
-        for step in steps:
-            show(layout(final, [int(t) for t in step]), 0.07)
+    before = None
+    for e in shown:
+        final = final_ids(e)
+        if e["how"] == "search":                    # one stage changed by the exact search
+            show(layout(final, final), 0.4)
+            note = f"   {DIM}(exact search){OFF}"
+        else:
+            if before is not None:                  # the part the model writes anew, hidden
+                show(layout(before, [P.MASK if h == P.MASK else t for h, t in zip(e["hidden"], before)]), 0.5)
+            for step in e["steps"]:
+                show(layout(final, [int(t) for t in step]), 0.05)
+            note = ""
         prog = P.parse(P.decode(final))
-        print("   " + tag(prog, examples))
+        print("   " + tag(prog, examples) + note)
         before = final
     ok = right(best.program, examples) == len(examples)
     if hidden and ok:

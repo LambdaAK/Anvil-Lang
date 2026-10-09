@@ -1,7 +1,7 @@
 # synth.anvil — a diffusion model that writes programs from examples.
 #
 #     python3 examples/synth/prepare.py                 1,800,000 tasks (once)
-#     bin/anvil run --metal examples/synth.anvil        learn (about 55 minutes on the GPU), then write
+#     bin/anvil run --metal examples/synth.anvil        learn (about 85 minutes on the GPU), then write
 #                                                       programs for 500 test tasks
 #     python3 examples/synth/evaluate.py                how many of those programs are right
 #     python3 examples/synth/write.py "[3, 1, 2] -> [1, 2, 3]" "[5, 4, 9] -> [4, 5, 9]"

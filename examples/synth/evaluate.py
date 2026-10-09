@@ -81,70 +81,86 @@ def main():
 
 def search(n: int, tries: int = 8, rounds: int = 8):
     """The same tasks, written by search.py: the likeliest program alone; the shortest of `tries`
-    programs that fits the examples shown; and the same after `rounds` rounds of write, run, fix."""
+    programs that fits the examples shown; with the exact search around the closest; and with `rounds`
+    rounds of write, run, fix as well."""
     import time
     import search as S
     tasks = [json.loads(line) for line in open(os.path.join(DATA, "test.jsonl"))][:n]
     s = S.Search(batch=256)
     shown = [[(xs, ys) for xs, ys in t["examples"][:P.N_SHOWN]] for t in tasks]
     print(f"{n} test tasks, programs never seen in training; right = also right on the 4 hidden examples")
-    for r in (0, rounds):
+    for what, r, climbs in ((f"{tries} tries, the shortest that fits", 0, 0),
+                            ("... and the exact search around the closest", 0, 4),
+                            (f"... and {rounds} rounds of write, run, fix", rounds, 4)):
         start = time.time()
-        pools = s.run_many(shown, tries=tries, rounds=r)
-        if r == 0:
+        pools = s.run_many(shown, tries=tries, rounds=r, climbs=climbs)
+        took = (time.time() - start) / n
+        if not r and not climbs:
             right = sum(fits(pool[0].program, t["examples"]) for pool, t in zip(pools, tasks))
-            print(f"  the likeliest program                          {100 * right / n:5.1f}%")
+            print(f"  {'the likeliest program':48s} {100 * right / n:5.1f}%")
         right = sum(fits(S.first_fit(pool, P.N_SHOWN).program, t["examples"]) for pool, t in zip(pools, tasks))
-        what = f"{tries} tries, the shortest that fits" if r == 0 else f"{tries} tries and {r} rounds of write, run, fix"
-        print(f"  {what:46s} {100 * right / n:5.1f}%   ({time.time() - start:.0f} s)")
+        print(f"  {what:48s} {100 * right / n:5.1f}%   ({took:.2f} s a task)")
+    # the hybrid: programs of up to two stages by enumeration (instant), the model for the rest
+    start = time.time()
+    short = [enumerate_task(t["examples"][:P.N_SHOWN], 2)[0] for t in tasks]
+    rest = [i for i, p in enumerate(short) if p is None]
+    pools = s.run_many([shown[i] for i in rest], tries=tries, rounds=rounds, climbs=4) if rest else []
+    chosen = dict(zip(rest, (S.first_fit(pool, P.N_SHOWN).program for pool in pools)))
+    right = sum(fits(short[i] if short[i] is not None else chosen[i], t["examples"]) for i, t in enumerate(tasks))
+    took = (time.time() - start) / n
+    print(f"  {'up to 2 stages by enumeration, then all of that':48s} {100 * right / n:5.1f}%   ({took:.2f} s a task)")
 
 
-def stages():
-    """Every stage of Pipes: (name, argument), the list stages first."""
-    out = [("map", (op, k)) for op in "+-*" for k in range(1, 5)]
-    out += [("filter", (c, k)) for c in "<>" for k in range(10)] + [("filter", "even"), ("filter", "odd")]
-    out += [("sort", None), ("reverse", None), ("cumsum", None)]
-    out += [(n, k) for n in ("take", "drop") for k in range(1, 5)]
-    return out, [(n, None) for n in P.NUMBER_STAGES]
+def enumerate_task(shown, max_stages: int = 3, budget: float = 0.0):
+    """No model: every program, the fewest stages first, until one fits the examples shown (the
+    simplest explanation of them), as an enumerative synthesizer does. A partial program whose outputs
+    on the examples are the same as a shorter one's is not extended (it cannot lead anywhere new).
+    Returns (program or None, whether it ran out of time)."""
+    import time
+    t0 = time.time()
+    lists, numbers = P.all_stages()
+    want = [as_value(ys) for _, ys in shown]
+    level = [([], [list(xs) for xs, _ in shown])]
+    seen = {repr(level[0][1])}
+    for depth in range(1, max_stages + 1):
+        nxt = []
+        for prog, vals in level:
+            for st in lists + numbers:
+                out = [P.apply(st, v) for v in vals]
+                if any(o is None for o in out):
+                    continue
+                if out == want:
+                    return prog + [st], False
+                if depth < max_stages and st[0] not in P.NUMBER_STAGES:
+                    key = repr(out)
+                    if key not in seen:
+                        seen.add(key)
+                        nxt.append((prog + [st], out))
+            if budget and time.time() - t0 > budget:
+                return None, True
+        level = nxt
+    return None, False
 
 
-def enumerate_baseline(n: int, max_stages: int = 3):
-    """No model: try every program of up to max_stages stages, shortest first, and keep the first that
-    fits the four examples shown (the simplest explanation of them), as an enumerative synthesizer does."""
+def enumerate_baseline(n: int, max_stages: int = 3, budget: float = 0.0):
     import time
     tasks = [json.loads(line) for line in open(os.path.join(DATA, "test.jsonl"))][:n]
-    lists, numbers = stages()
-    start, right, found = time.time(), 0, 0
+    start, right, found, timeouts = time.time(), 0, 0, 0
     for t in tasks:
-        shown = [(xs, as_value(ys)) for xs, ys in t["examples"][:P.N_SHOWN]]
-        want = [ys for _, ys in shown]
-        level, best = [([], [xs for xs, _ in shown])], None
-        for depth in range(1, max_stages + 1):
-            nxt = []
-            for prog, vals in level:                      # programs of depth - 1 stages and their outputs
-                for st in lists + numbers:
-                    out = [P.run([st], v) if isinstance(v, list) else None for v in vals]
-                    if any(o is None for o in out):
-                        continue
-                    if out == want:
-                        best = prog + [st]
-                        break
-                    if st in lists:
-                        nxt.append((prog + [st], out))
-                if best:
-                    break
-            if best:
-                break
-            level = nxt
+        best, out_of_time = enumerate_task(t["examples"][:P.N_SHOWN], max_stages, budget)
         found += best is not None
+        timeouts += out_of_time
         right += best is not None and fits(best, t["examples"])
-    print(f"every program of up to {max_stages} stages, the shortest that fits: right {100 * right / n:5.1f}%"
-          f"   (one found for {100 * found / n:.1f}%; {(time.time() - start) / n:.2f} s a task)")
+    limit = f", at most {budget:g} s a task" if budget else ""
+    print(f"every program of up to {max_stages} stages{limit}, the shortest that fits: right {100 * right / n:5.1f}%"
+          f"   (one found for {100 * found / n:.1f}%, out of time for {100 * timeouts / n:.1f}%;"
+          f" {(time.time() - start) / n:.2f} s a task)")
 
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--enumerate"]:
-        enumerate_baseline(int(sys.argv[2]) if len(sys.argv) > 2 else 500, int(sys.argv[3]) if len(sys.argv) > 3 else 3)
+        args = sys.argv[2:] + [None] * 3
+        enumerate_baseline(int(args[0] or 500), int(args[1] or 3), float(args[2] or 0))
         sys.exit()
     if sys.argv[1:2] == ["--search"]:
         search(int(sys.argv[2]) if len(sys.argv) > 2 else 200)
