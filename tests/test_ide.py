@@ -89,11 +89,19 @@ def test_cli_json_from_stdin():
 
 
 def test_every_example_analyzes_cleanly():
+    """Every example compiles without errors, except for data that has to be downloaded first (EMNIST,
+    SST-2, a Hugging Face model): an example whose only errors are files not found is left out."""
+    checked = 0
     for name in sorted(os.listdir(os.path.join(ROOT, "examples"))):
         if name.endswith(".anvil"):
             r = analyze(os.path.join(ROOT, "examples", name))
-            assert [d for d in r["diagnostics"] if d["severity"] == "error"] == [], name
+            errors = [d for d in r["diagnostics"] if d["severity"] == "error"]
+            if errors and all(d["message"].startswith(("data file not found", "model file not found")) for d in errors):
+                continue
+            assert errors == [], name
             assert r["hovers"], name
+            checked += 1
+    assert checked >= 15
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
