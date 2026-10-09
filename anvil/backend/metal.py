@@ -200,11 +200,14 @@ class MetalGen(CudaGen):
         if isinstance(st, ir.For):
             c = self.bname(st.counter)
             out = self.sync(ind, self.gpu_reads([st.start, st.stop]))
+            # each iteration gets its own autorelease pool: the command buffers and encoders made in
+            # it are released when it ends (with one pool for the whole program, a long training
+            # loop kept every one of them, megabytes per step)
             out += [f"{ind}{{", f"{ind}    long stop_ = {self.scalar(st.stop)};",
-                    f"{ind}    for ({c}[0] = (int)({self.scalar(st.start)}); {c}[0] < stop_; {c}[0] += {st.step}) {{"]
+                    f"{ind}    for ({c}[0] = (int)({self.scalar(st.start)}); {c}[0] < stop_; {c}[0] += {st.step}) @autoreleasepool {{"]
             return out + self.block(st.body, ind + "        ") + [f"{ind}    }}", f"{ind}}}"]
         if isinstance(st, ir.While):
-            out = [f"{ind}while (1) {{"] + self.block(st.cond_block, ind + "    ")
+            out = [f"{ind}while (1) @autoreleasepool {{"] + self.block(st.cond_block, ind + "    ")
             out += self.sync(ind + "    ", self.gpu_reads([st.cond]))
             out += [f"{ind}    if ({self.bname(st.cond)}[0] == 0) break;"]
             return out + self.block(st.body, ind + "    ") + [f"{ind}}}"]
