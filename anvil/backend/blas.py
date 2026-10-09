@@ -103,8 +103,11 @@ class Product:
     vk: Var
     la: tuple
     lb: tuple
-    batch: list                     # domain variables other than i and j
-    summed: list                    # reduction variables other than k
+    batch: list                     # domain variables other than i and j (and those merged into i)
+    summed: list                    # reduction variables other than k (and those merged into k)
+    M: int = 0                      # rows: i's extent, times that of batch indices merged into it
+    K: int = 0                      # the summed length: k's, times that of summed indices merged into it
+    rows: list = field(default_factory=list)   # i, then the batch indices merged into it (inner to outer)
 
 
 def product(k: Kernel, size_min: int) -> Product | None:
@@ -133,20 +136,39 @@ def product(k: Kernel, size_min: int) -> Product | None:
             jj = [v for v in reversed(D) if cb.get(v) and not ca.get(v)]
             for vi in ii:
                 for vj in jj:
-                    M, N, K = vi.extent, vj.extent, vk.extent
+                    # Indices next to k in memory, in both operands, extend it: Σ_b,i over [b, i, ...] is
+                    # one sum over b·i rows (a weight's gradient sums over the batch and the tokens). A
+                    # batch index next to i in A (and not in B) extends i the same way: one product of
+                    # [b·i, k] rows, not a call per b. (match checks that it is next to i in C too.)
+                    K, ks = vk.extent, [vk]
+                    M, rows = vi.extent, [vi]
+                    grown = True
+                    while grown:
+                        grown = False
+                        for v in R:
+                            if v not in ks and ca.get(v) and ca.get(v) == ca[vk] * K and cb.get(v) == cb[vk] * K:
+                                K *= v.extent
+                                ks.append(v)
+                                grown = True
+                        for v in D:
+                            if v not in rows and v is not vj and not cb.get(v) and ca.get(v) and ca[v] == ca[vi] * M:
+                                M *= v.extent
+                                rows.append(v)
+                                grown = True
+                    N = vj.extent
                     if M < 2 or N < 2 or M * N * K < size_min:
                         continue
                     la = layout(ca[vi], ca[vk], M, K)
                     lb = layout(cb[vk], cb[vj], K, N)
                     if la is None or lb is None:
                         continue
-                    batch = [v for v in D if v is not vi and v is not vj]
-                    summed = [v for v in R if v is not vk]
+                    batch = [v for v in D if v is not vj and v not in rows]
+                    summed = [v for v in R if v not in ks]
                     if ir.prod(v.extent for v in batch + summed) > MAX_CALLS:
                         continue
                     if any(v.extent > 1 for v in batch) and (M * N * K < max(size_min, BATCH_MIN) or min(M, N) < 16):
                         continue           # many small calls: Anvil's own kernel is faster
-                    return Product(a, b, vi, vj, vk, la, lb, batch, summed)
+                    return Product(a, b, vi, vj, vk, la, lb, batch, summed, M, K, rows)
     return None
 
 
@@ -161,21 +183,35 @@ def match(k: Kernel, size_min: int) -> Gemm | None:
     cc = plain(st.offset, set(k.domain))
     if cc is None or cc.get(p.vj, 0) != 1 or cc.get(p.vi, 0) < p.vj.extent:
         return None
+    step = cc[p.vi]
+    for v in p.rows[1:]:                                   # rows merged into i must be next to it in C too
+        if cc.get(v, 0) != step * v_prev_extent(p.rows, v):
+            return None
     if any(not cc.get(v) for v in p.batch if v.extent > 1):
         return None                                        # every element of the batch has its own result
     if st.buf.root in (p.a.buf.root, p.b.buf.root):
         return None                                        # BLAS does not allow the result to overlap
     loops = [Loop(v.extent, p.a.offset.coef(v), p.b.offset.coef(v), cc.get(v, 0), False) for v in p.batch]
     loops += [Loop(v.extent, p.a.offset.coef(v), p.b.offset.coef(v), 0, True) for v in p.summed]
-    return Gemm(p.vi.extent, p.vj.extent, p.vk.extent, p.a.buf, p.a.offset.const, p.la[0], p.la[1],
+    return Gemm(p.M, p.vj.extent, p.K, p.a.buf, p.a.offset.const, p.la[0], p.la[1],
                 p.b.buf, p.b.offset.const, p.lb[0], p.lb[1], st.buf, st.offset.const, cc[p.vi],
                 1.0 if st.accumulate else 0.0, [lp for lp in loops if lp.extent > 1])
+
+
+def v_prev_extent(rows: list, v) -> int:
+    """The rows of i and of the indices merged into it before v: how far v steps, in rows."""
+    n = 1
+    for r in rows:
+        if r is v:
+            return n
+        n *= r.extent
+    raise ValueError(v)
 
 
 def split(k: Kernel, prog: ir.Program, p: Product) -> Kernel:
     """A product with an epilogue: the product into a scratch tensor (returned, a new kernel), and k
     itself becomes the epilogue, reading the product from the scratch tensor."""
-    order = p.batch + [p.vi, p.vj]                         # the scratch tensor's dimensions
+    order = p.batch + list(reversed(p.rows)) + [p.vj]     # the scratch tensor's dimensions
     shape = tuple(v.extent for v in order)
     strides = dict(zip(order, ir.row_major_strides(shape)))
     scratch = Buffer(f"{k.name}_product", shape, F32, "temp")
@@ -198,7 +234,7 @@ def split(k: Kernel, prog: ir.Program, p: Product) -> Kernel:
 
 def preview(p: Product) -> Gemm:
     """The Gemm a split product would become (its result is a fresh row-major tensor: C is None)."""
-    return Gemm(p.vi.extent, p.vj.extent, p.vk.extent, p.a.buf, p.a.offset.const, p.la[0], p.la[1],
+    return Gemm(p.M, p.vj.extent, p.K, p.a.buf, p.a.offset.const, p.la[0], p.la[1],
                 p.b.buf, p.b.offset.const, p.lb[0], p.lb[1], None, 0, p.vj.extent, 0.0,
                 [Loop(v.extent, p.a.offset.coef(v), p.b.offset.coef(v), 0, False) for v in p.batch if v.extent > 1]
                 + [Loop(v.extent, p.a.offset.coef(v), p.b.offset.coef(v), 0, True) for v in p.summed if v.extent > 1])

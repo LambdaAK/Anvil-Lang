@@ -197,7 +197,7 @@ def main(argv=None):
         from .ide import shape_sheet
         print(shape_sheet(args.file))
         return 0
-    optimize = (args.noopt or args.noopt2 or args.check)     # --check: one kernel per operation, one line each
+    optimize = not (args.noopt or args.noopt2 or args.check)     # --check: one kernel per operation, one line each
     if args.command == "export":
         from .export import export
         try:
