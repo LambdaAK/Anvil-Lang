@@ -1,0 +1,13 @@
+# The trained model on one task (write.py puts its examples in ask.npy): the likeliest program, and
+# 32 samples, with every step of their writing.
+use "../synth_model.anvil"
+
+ask = npy("../data/synth/ask.npy")
+net = Writer()
+found = load(net, "../synth.weights")
+assert found == 1, "no synth.weights yet: run bin/anvil run --metal examples/synth.anvil first"
+best, best_steps = write(net, ask, 0.0, true)
+many[k, j] = ask[0, j] where k < 32
+tries, try_steps = write(net, many, 1.0)
+save_npy(best_steps, "../data/synth/ask_best.npy")
+save_npy(try_steps, "../data/synth/ask_tries.npy")

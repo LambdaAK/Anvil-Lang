@@ -1,0 +1,83 @@
+# synth.anvil — a diffusion model that writes programs from examples.
+#
+#     python3 examples/synth/prepare.py                 600,000 tasks (once)
+#     bin/anvil run --metal examples/synth.anvil        learn (about 17 minutes on the GPU), then write
+#                                                       programs for 500 test tasks
+#     python3 examples/synth/evaluate.py                how many of those programs are right
+#     python3 examples/synth/write.py "[3, 1, 2] -> [1, 2, 3]" "[5, 4, 9] -> [4, 5, 9]"
+#
+# The programs are in Pipes (synth/pipes.py), a little language of list pipelines such as
+# `x |> filter(odd) |> map(* 3) |> sum`. A task is four examples of what a program does to a list of
+# digits; the model (synth_model.anvil) writes the program, and four more examples it has not seen
+# check it. The test tasks' programs never appear in the training tasks.
+
+use "synth_model.anvil"
+
+const EPOCHS = 2
+const BATCH = 128
+const LR = 1e-3
+const RETRAIN = 0            # 1: learn again even if synth.weights exists
+const SAVE = "synth.weights"
+const TASKS = 500            # test tasks to write programs for
+const TRIES = 8              # sampled programs for each (besides the likeliest one)
+const CHUNK = 500            # programs written at a time
+
+data = npy("data/synth/train.npy")
+test = npy("data/synth/test.npy")
+net = Writer()
+
+const STEPS = EPOCHS * (len(data) // BATCH)
+
+fn learn():
+    step = 0
+    seen = 0.0
+    right = 0.0
+    start = clock()
+    for epoch in range(EPOCHS):
+        for x in batches(data, size=BATCH, shuffle=true):
+            # hide each program token with probability t, a different t for every task
+            t: [BATCH] ~ uniform(0, 1)
+            u: [BATCH, SEQ] ~ uniform(0, 1)
+            noisy[b, j] = MASK if j >= SPEC and u[b, j] < t[b] else x[b, j]
+            hidden[b, p] = f32(u[b, SPEC + p] < t[b]) where p < PROGRAM
+            target = x[:, SPEC:SEQ]
+            scores = net(noisy)
+            lp = log_softmax(scores)
+            nll[b, p] = -lp[b, p, target[b, p]]
+            loss = sum(nll * hidden) / (sum(hidden) + 1)
+            minimize loss with adam(lr=warmup_cosine(step, STEPS, LR, 400), clip_norm=1.0)
+            step += 1
+            seen = seen + loss
+            right = right + sum(f32(argmax(scores) == target) * hidden) / (sum(hidden) + 1)
+            if step % 500 == 0:
+                print("step {step:5d} of {STEPS}   loss {seen / 500:.4f}   hidden tokens right {right / 500:.1%}   ({clock() - start:.0f} s)")
+                seen = 0.0
+                right = 0.0
+
+loaded = 0.0
+if RETRAIN == 0:
+    loaded = load(net, SAVE)
+if loaded > 0:
+    print("(the model from an earlier run, in {SAVE}: --set RETRAIN=1 to learn again)")
+else:
+    learn()
+    save(net, SAVE)
+
+# programs for the first TASKS test tasks: the likeliest program, then TRIES samples of each
+spec = test[0:TASKS, 0:SPEC]
+start = clock()
+best: i32[TASKS, PROGRAM] = PAD
+tries: i32[TRIES * TASKS, PROGRAM] = PAD
+many[k, i, j] = spec[i, j] where k < TRIES
+many2 = many.reshape(-1, SPEC)
+for c in range(TASKS // CHUNK):
+    part[i, j] = spec[c * CHUNK + i, j] where i < CHUNK
+    progs, steps = write(net, part, 0.0, true)
+    best[c * CHUNK : c * CHUNK + CHUNK] = progs
+for c in range(TRIES * TASKS // CHUNK):
+    part[i, j] = many2[c * CHUNK + i, j] where i < CHUNK
+    progs, steps = write(net, part, 1.0)
+    tries[c * CHUNK : c * CHUNK + CHUNK] = progs
+save_npy(best, "data/synth/best.npy")
+save_npy(tries, "data/synth/tries.npy")
+print("wrote {TASKS * (TRIES + 1)} programs for {TASKS} test tasks in {clock() - start:.1f} s: python3 examples/synth/evaluate.py")

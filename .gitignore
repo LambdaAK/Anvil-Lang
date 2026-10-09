@@ -33,3 +33,4 @@ benchmarks/vs_pytorch/data/
 benchmarks/vs_pytorch/build/
 examples/data/sst2/
 examples/data/bge-small
+examples/data/synth/

@@ -1,0 +1,76 @@
+# synth_model.anvil — a transformer that writes Pipes programs (examples/synth/pipes.py) by diffusion.
+#
+# The input is 80 tokens: four examples of what the program should do (input list, output), then the
+# program's 24 tokens. While it learns, a random fraction of the program's tokens are hidden ([MASK])
+# and it guesses them all at once. To write a program it starts from 24 masks and, step by step,
+# fixes the token it is surest of, until none is left: masked diffusion, as in MDLM and LLaDA.
+# synth.anvil trains it; synth/write.py asks it for programs.
+
+const VOCAB = 227            # tokens: see pipes.py
+const SPEC = 56              # 4 examples of 14 tokens
+const PROGRAM = 24           # program tokens
+const SEQ = SPEC + PROGRAM
+const PAD = 0
+const MASK = 1
+const D = 256
+const HEADS = 8
+const DH = D // HEADS
+const LAYERS = 6
+
+# a pre-norm transformer block that attends both ways: every token sees the examples and the whole
+# program written so far
+model Block:
+    norm1 = LayerNorm(D)
+    q = Linear(D, D)
+    k = Linear(D, D)
+    v = Linear(D, D)
+    o = Linear(D, D)
+    norm2 = LayerNorm(D)
+    up = Linear(D, 4 * D)
+    down = Linear(4 * D, D)
+    fn forward(x: [n, SEQ, D]):
+        h = norm1(x)
+        qs = q(h).reshape(-1, SEQ, HEADS, DH)
+        ks = k(h).reshape(-1, SEQ, HEADS, DH)
+        vs = v(h).reshape(-1, SEQ, HEADS, DH)
+        s[b, a, i, j] = sum qs[b, i, a, e] * ks[b, j, a, e] / sqrt(DH)
+        mixed[b, i, a, e] = sum softmax(s)[b, a, i, j] * vs[b, j, a, e]
+        x = x + o(mixed.reshape(-1, SEQ, D))
+        return x + down(gelu(up(norm2(x))))
+
+model Writer:
+    param E: [VOCAB, D] ~ normal(0, 0.02)
+    param P: [SEQ, D] ~ normal(0, 0.02)
+    blocks = [Block() for k in range(LAYERS)]
+    norm = LayerNorm(D)
+    out = Linear(D, VOCAB)
+    # tokens: i32[n, SEQ], examples then program (hidden tokens are MASK); scores for every program
+    # token, [n, PROGRAM, VOCAB]
+    fn forward(tokens: i32[n, SEQ]):
+        x[b, t, d] = E[tokens[b, t], d] + P[t, d]
+        static for block in blocks:
+            x = block(x)
+        return out(norm(x)[:, SPEC:SEQ, :])
+
+# Programs for the examples in spec (i32[n, SPEC]): from all masks, fix the surest token at each of
+# PROGRAM steps. heat adds Gumbel noise to the scores (0: always the likeliest token; 1: samples).
+# pads_last: fix the program's words before the padding after it. The model is surest of padding, so
+# otherwise it settles the program's length first and its words last. (For the likeliest program it
+# is a little better this way, and nicer to watch; samples written this way are often too long.)
+# Returns the programs, i32[n, PROGRAM], and the steps, i32[PROGRAM, n, PROGRAM], to watch.
+fn write(net, spec: i32[n, SPEC], heat, pads_last = false):
+    seq: i32[n, SEQ] = MASK
+    seq[:, 0:SPEC] = spec
+    prog: i32[n, PROGRAM] = MASK
+    steps: i32[PROGRAM, n, PROGRAM] = MASK
+    for step in range(PROGRAM):
+        scores = net(seq)
+        u: [n, PROGRAM, VOCAB] ~ uniform(1e-6, 1)
+        guess = argmax(scores - heat * log(-log(u)))
+        p = softmax(scores)
+        sure[b, i] = p[b, i, guess[b, i]] - (2.0 if pads_last and guess[b, i] == PAD else 0.0) if prog[b, i] == MASK else -9.0
+        where = argmax(sure)
+        prog[b, i] = guess[b, i] if i == where[b] else prog[b, i]
+        seq[:, SPEC:SEQ] = prog
+        steps[step] = prog
+    return prog, steps
