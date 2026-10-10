@@ -1,0 +1,75 @@
+# handwriting.anvil — a diffusion model learns to draw handwritten characters, so that it can write
+# any sentence by hand (python3 examples/handwriting/write.py "hello world", or bin/handwrite).
+#
+#     bin/anvil run --metal examples/handwriting.anvil      learn (about 45 minutes on the GPU; data:
+#                                                           examples/data/emnist, from NIST)
+#
+# The data is EMNIST: 698,000 letters and digits written by about 3,600 people (see letters.anvil
+# for where to get it). Each is drowned in a random amount of noise, and the U-Net of
+# handwriting_model.anvil learns to tell the noise from the drawing, told the noise level and which
+# of the 62 characters it is (hidden 10% of the time, so that it also learns to draw "any character",
+# which guidance leans away from). At the end it draws every character once.
+
+use "handwriting_model.anvil"
+
+const EPOCHS = 3
+const BATCH = 128
+const LR = 5e-4
+const RETRAIN = 0            # 1: learn again even if handwriting.weights exists
+const SAVE = "handwriting.weights"
+const GUIDANCE = 2.0
+const CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+images = idx("data/emnist/emnist-byclass-train-images-idx3-ubyte.gz")
+labels = i32(idx("data/emnist/emnist-byclass-train-labels-idx1-ubyte.gz"))
+X = images.reshape(-1, 1, 28, 28)
+
+net = UNet()
+
+const STEPS = EPOCHS * (len(labels) // BATCH)
+
+fn learn():
+    beta, alpha, alpha_bar, alpha_bar_prev = schedule()
+    step = 0
+    seen = 0.0
+    start = clock()
+    for epoch in range(EPOCHS):
+        for x, c in batches(X, labels, size=BATCH, shuffle=true):
+            x0[n, k, i, j] = x[n, k, j, i] / 127.5 - 1          # EMNIST is stored transposed; [-1, 1]
+            t: i32[BATCH] ~ randint(0, T)
+            noise: [BATCH, 1, 28, 28] ~ normal(0, 1)
+            hide: [BATCH] ~ bernoulli(0.1)
+            label[b] = ANY if hide[b] > 0 else c[b]
+            xt[b, k, i, j] = sqrt(alpha_bar[t[b]]) * x0[b, k, i, j] + sqrt(1 - alpha_bar[t[b]]) * noise[b, k, i, j]
+            loss = mse(net(xt, t, label), noise)
+            minimize loss with adam(lr=warmup_cosine(step, STEPS, LR, 500), clip_norm=1.0)
+            step += 1
+            seen = seen + loss
+            if step % 500 == 0:
+                print("step {step:5d} of {STEPS}   loss {seen / 500:.4f}   ({clock() - start:.0f} s)")
+                seen = 0.0
+            if step % 4000 == 0:
+                save(net, "handwriting.partial.weights")     # (a long run that is stopped keeps this much)
+
+loaded = 0.0
+if RETRAIN == 0:
+    loaded = load(net, SAVE)
+if loaded > 0:
+    print("(the model from an earlier run, in {SAVE}: --set RETRAIN=1 to learn again)")
+else:
+    learn()
+    save(net, SAVE)
+
+# every character once, drawn out of noise, at half size in quarter blocks: 12 to a row
+const SLOTS = 72
+which[k] = k if k < KINDS else ANY where k < SLOTS
+noise: [T + 1, SLOTS, 1, 28, 28] ~ normal(0, 1)
+drawn, frames = draw(net, which, noise, GUIDANCE)
+half[n, i, j] = sum drawn[n, 0, 2 * i + a, 2 * j + d] / 4 where a < 2, d < 2
+on[n, i, j] = f32(half[n, i, j] > 0 and n < KINDS)
+quad[n, i, j] = on[n, 2*i, 2*j] + 2 * on[n, 2*i, 2*j + 1] + 4 * on[n, 2*i + 1, 2*j] + 8 * on[n, 2*i + 1, 2*j + 1] where i < 7, j < 7
+canvas: [6 * 8, 12 * 8] = 0
+grid = quad.reshape(6, 12, 7, 7)
+canvas[r * 8 + i, a * 8 + j] += grid[r, a, i, j]
+print("\nthe characters it draws, " + CHARS + ":\n")
+show(i32(canvas), " ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█")

@@ -677,6 +677,7 @@ generating code: about 50 ms for MNIST.
 | [`dream.anvil`](examples/dream.anvil) | gradients with respect to the input: the digit network's dreams of each digit, and real digits changed by at most 0.2 per pixel until it misreads all ten | 100% fooled, in under a second |
 | [`sentiment.anvil`](examples/sentiment.anvil) | a pretrained 12-layer BERT ([`bge_small.anvil`](examples/bge_small.anvil), weights read from its Hugging Face file) fine-tuned to read the sentiment of a sentence (SST-2) | 91.97% after 2 epochs (9 min) |
 | [`synth.anvil`](examples/synth.anvil) | a transformer that writes programs from examples by masked diffusion; an exact search and the model's own edits fix them until they fit (`bin/synth`) | training: about 90 min on the GPU |
+| [`handwriting.anvil`](examples/handwriting.anvil) | a diffusion model (a U-Net in index notation) that draws handwritten characters; `bin/handwrite` writes sentences with it and reads them back | 89% of a sentence's characters read back (training: 45 min on the GPU) |
 
 ### Reinforcement learning: Snake
 
@@ -871,6 +872,53 @@ four, where 12% of the test programs are, are not.) The model for this version o
 finished training yet (it was stopped at step 21,500 of 28,124; `bin/synth` uses the checkpoint from
 step 20,000), so its scores are still to come (`evaluate.py --search 200`). Some functions are not
 Pipes programs at all: no stage treats the first few elements differently from the rest.
+
+### Handwriting by diffusion
+
+```bash
+bin/handwrite "The quick brown fox jumps over the lazy dog. Anvil writes by hand!"
+```
+
+![handwriting](docs/images/handwriting.png)
+
+![the characters being drawn out of noise](docs/images/handwriting.gif)
+
+[`examples/handwriting.anvil`](examples/handwriting.anvil) trains a diffusion model to draw any of
+EMNIST's 62 characters (0-9, A-Z, a-z) on request: a drawing is drowned in a random amount of noise,
+and the network learns to tell the noise from the drawing, told the noise level and the character.
+The network ([`handwriting_model.anvil`](examples/handwriting_model.anvil)) is a small U-Net, 1.1
+million parameters, in index notation: convolutions at 28×28, 14×14 and 7×7, the noise level and the
+character added to every block, and skips across. Making a picture twice as big is one line:
+
+```python
+up[b, k, 2 * i + a, 2 * j + d] += x[b, k, i, j] where a < 2, d < 2
+```
+
+It trains in about 45 minutes on the GPU (three passes over 698,000 characters). Drawing starts
+from noise and steps down 200 noise levels, leaning towards the character asked for
+(classifier-free guidance).
+
+[`handwriting/write.py`](examples/handwriting/write.py) writes a sentence:
+
+1. The model draws every character, all at once. The characters share part of their noise, so they
+   share a style.
+2. The letter network that reads `bin/draw --text` ([`letters.anvil`](examples/letters.anvil))
+   checks each drawing; one it cannot make out (about one in three) is drawn again.
+3. The characters are set like handwriting: capitals, digits and b/d/f/h/k/l/t full height, other
+   small letters smaller, g/j/p/q/y below the line, a slant for the whole sentence, and a little
+   wobble. EMNIST has no punctuation, so `. , ! ? ' - :` are drawn with a pen of the same width.
+4. The letter network reads the sentence back, with the text reader's dictionary:
+
+```
+  wrote:     The quick brown fox jumps over the lazy dog. Anvil writes by hand!
+  read back: The 9n1ck brown FON jumps over the lazy dog. Anui1 writes bu hand!   (89% of the characters)
+```
+
+Before the check, the letter network recognizes 66% of the drawings as the character asked for (on
+EMNIST's own test characters it gets 87%), and about one in twenty drawings is still noise at the
+end. The model's capital A is its weakest. A first version guessed the clean drawing through a
+`tanh` and did not learn at all: most pixels are background, so its output went to -1 and the
+`tanh` flattened, leaving no gradient. Guessing the noise instead learns at once.
 
 ### Draw a digit
 
@@ -1140,7 +1188,7 @@ convolutions.
 python3 -m pytest tests
 ```
 
-There are 338 tests:
+There are 340 tests:
 - Every autodiff rule is checked against float64 finite differences.
 - Optimized programs must match unoptimized ones exactly.
 - Native code must match the NumPy reference interpreter on tricky shapes (vector tails, gathers,
@@ -1163,6 +1211,8 @@ There are 338 tests:
   match the interpreter.
 - `--check` must find the first NaN and the line that made it. `anvil export`'s libraries must
   give the same results when called from C. A real notebook with `%%anvil` cells must run.
+- Handwriting: the U-Net, a training step and the sampler must compile; the page must set
+  characters by size and in order, and wrap.
 - The program writer: every Pipes program must survive its tokens and its text; the search must
   give partial credit and only hide parts of programs.
 - Pretrained models: tensors read from a `.safetensors` file must match NumPy; lists of layers must
@@ -1191,9 +1241,10 @@ anvil/backend/    AArch64: kernel lowering, vecmath (inline exp/log/tanh/sin/cos
 examples/       programs, MNIST data, examples/errors/, examples/draw/ (bin/draw),
                 examples/sentiment/ (BERT's tokenizer, SST-2 preparation, the PyTorch reference)
                 examples/synth/ (Pipes, its tasks, write-run-fix search, evaluation)
+                examples/handwriting/ (writing sentences: drawing, setting, reading back)
 benchmarks/     Anvil against NumPy (run.py → results.md); vs_pytorch/: nine projects in Anvil and
                 PyTorch, and REPORT.md
-bin/            anvil, draw, checkers, synth
+bin/            anvil, draw, checkers, synth, handwrite
 experiments/    ablations and MNIST sweeps (run.py → results.md)
 editors/vscode/ syntax highlighting for VS Code and Cursor
 tests/          pytest suite

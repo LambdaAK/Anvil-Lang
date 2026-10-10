@@ -1,0 +1,16 @@
+#!/bin/sh
+# Write a sentence by hand: a diffusion model written in Anvil draws every character.
+#     bin/handwrite "Hello world"              (options: --seed N, --style S, --guidance G, --open)
+# The first time, it trains the model (examples/handwriting.anvil, about 45 minutes on the GPU) and
+# the letter network that reads the writing back (examples/letters.anvil, two minutes). Both learn
+# from EMNIST, in examples/data/emnist (see examples/letters.anvil for where to get it).
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [ ! -f "$DIR/examples/letters.weights" ]; then
+    echo "first, the letter network learns (examples/letters.anvil: about two minutes)"
+    "$DIR/bin/anvil" run "$DIR/examples/letters.anvil" || exit 1
+fi
+if [ ! -f "$DIR/examples/handwriting.weights" ]; then
+    echo "first, the handwriting model learns (examples/handwriting.anvil: about 45 minutes on the GPU)"
+    "$DIR/bin/anvil" run --metal "$DIR/examples/handwriting.anvil" || exit 1
+fi
+exec python3 "$DIR/examples/handwriting/write.py" "$@"

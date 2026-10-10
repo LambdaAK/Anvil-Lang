@@ -1,0 +1,103 @@
+# handwriting_model.anvil — a diffusion model that draws handwritten characters: any of the 62 of
+# EMNIST (0-9, A-Z, a-z), on request. handwriting.anvil trains it; handwriting/write.py writes
+# sentences with it.
+#
+# The denoiser is a small U-Net: convolutions at 28×28, 14×14 and 7×7, with the noise level and the
+# character added to every block, and skip connections from each size on the way down to the same
+# size on the way up. Given a noisy drawing, it guesses the noise in it. (Guessing the clean drawing
+# instead, through a tanh, did not learn: most pixels are background, so the output went to -1 and
+# the tanh flattened, with no gradient left to bring it back.)
+
+const T = 200                # noise levels
+const KINDS = 62             # characters (as in letters_model.anvil's CLASSES)
+const ANY = KINDS            # the label that means "any character" (for guidance)
+const E = 128                # the width of the conditioning (noise level and character)
+const C1 = 32                # channels at 28×28
+const C2 = 64                # at 14×14
+const C3 = 128               # at 7×7
+const FRAMES = 20            # snapshots of a drawing being made
+
+# the noise schedule: the noise added at each level, and how much of the drawing is left after level t
+fn schedule():
+    beta[t] = (1e-4 + (0.02 - 1e-4) * t / (T - 1)) * 1000 / T where t < T
+    alpha = 1 - beta
+    alpha_bar[t] = prod (alpha[s] if s <= t else 1.0) where t < T
+    alpha_bar_prev[t] = prod (alpha[s] if s < t else 1.0) where t < T     # alpha_bar[t - 1], 1 at t = 0
+    return beta, alpha, alpha_bar, alpha_bar_prev
+
+# every image of the batch brought to mean 0 and variance 1
+fn norm(x: [n, c, h, w]):
+    mu[b] = mean x[b, k, i, j]
+    var[b] = mean (x[b, k, i, j] - mu[b]) ** 2
+    out[b, k, i, j] = (x[b, k, i, j] - mu[b]) / sqrt(var[b] + 1e-5)
+    return out
+
+# each pixel four times: twice the height and the width
+fn upsample(x: [n, c, h, w]):
+    up: [n, c, 2 * h, 2 * w] = 0
+    up[b, k, 2 * i + a, 2 * j + d] += x[b, k, i, j] where a < 2, d < 2
+    return up
+
+# a residual block: two 3×3 convolutions, with the conditioning added to every channel in between
+model Block(c):
+    conv1 = Conv2d(c, c, 3, 1, 1)
+    conv2 = Conv2d(c, c, 3, 1, 1)
+    cond = Linear(E, c)
+    fn forward(x, e):
+        g = cond(e)
+        y = conv1(silu(norm(x)))
+        y[b, k, i, j] = y[b, k, i, j] + g[b, k]
+        return x + conv2(silu(norm(y)))
+
+model UNet:
+    level = Embedding(T, E)
+    char = Embedding(KINDS + 1, E)
+    inp = Conv2d(1, C1, 3, 1, 1)
+    b1 = Block(C1)
+    down1 = Conv2d(C1, C2, 3, 2, 1)          # 28 -> 14
+    b2 = Block(C2)
+    down2 = Conv2d(C2, C3, 3, 2, 1)          # 14 -> 7
+    b3 = Block(C3)
+    b4 = Block(C3)
+    up2 = Conv2d(C3, C2, 3, 1, 1)
+    b5 = Block(C2)
+    up1 = Conv2d(C2, C1, 3, 1, 1)
+    b6 = Block(C1)
+    out = Conv2d(C1, 1, 3, 1, 1)
+    # x: noisy drawings [n, 1, 28, 28]; t: their noise levels; c: the characters
+    fn forward(x, t: i32[n], c: i32[n]):
+        e = silu(level(t) + char(c))
+        h1 = b1(inp(x), e)                               # 28×28
+        h2 = b2(down1(h1), e)                            # 14×14
+        h3 = b4(b3(down2(h2), e), e)                     # 7×7
+        u2 = b5(up2(upsample(h3)) + h2, e)               # 14×14
+        u1 = b6(up1(upsample(u2)) + h1, e)               # 28×28
+        return out(u1)                                   # its guess of the noise in x
+
+# Draws the characters in labels (i32[n]: 0 … 61) out of the noise in noise ([T + 1, n, 1, 28, 28]:
+# where they start, and fresh noise for each step down). guidance: how strongly each drawing leans
+# towards its character (classifier-free guidance). fresh: 1 adds fresh noise at every step (DDPM),
+# 0 adds none and steps straight towards the guess of the finished drawing (DDIM), or anything in
+# between. Returns the drawings, [n, 1, 28, 28] in [-1, 1], and FRAMES snapshots of the network's
+# guess of them along the way.
+fn draw(net, labels: i32[n], noise, guidance, fresh = 1.0):
+    beta, alpha, alpha_bar, alpha_bar_prev = schedule()
+    x = noise[0]
+    anything: i32[n] = ANY
+    frames: [FRAMES, n, 1, 28, 28] = 0
+    for k in range(T):
+        s = T - 1 - k
+        level: i32[n] = s
+        sure = net(x, level, labels)
+        unsure = net(x, level, anything)
+        noise_guess = sure + guidance * (sure - unsure)
+        guess = min(max((x - sqrt(1 - alpha_bar[s]) * noise_guess) / sqrt(alpha_bar[s]), -1), 1)
+        mean_x = (sqrt(alpha_bar_prev[s]) * beta[s] * guess + sqrt(alpha[s]) * (1 - alpha_bar_prev[s]) * x) / (1 - alpha_bar[s])
+        sigma = sqrt((1 - alpha_bar_prev[s]) / (1 - alpha_bar[s]) * beta[s])
+        ddpm = mean_x + sigma * noise[k + 1]
+        towards = (x - sqrt(alpha_bar[s]) * guess) / sqrt(1 - alpha_bar[s])      # the noise the guess implies
+        ddim = sqrt(alpha_bar_prev[s]) * guess + sqrt(1 - alpha_bar_prev[s]) * towards
+        x = fresh * ddpm + (1 - fresh) * ddim
+        if k % (T // FRAMES) == T // FRAMES - 1:
+            frames[k // (T // FRAMES)] = guess
+    return x, frames

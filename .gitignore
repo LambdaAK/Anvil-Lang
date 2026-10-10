@@ -34,3 +34,4 @@ benchmarks/vs_pytorch/build/
 examples/data/sst2/
 examples/data/bge-small
 examples/data/synth/
+examples/data/handwriting/

@@ -7,7 +7,7 @@
 #     python3 examples/synth/write.py "[3, 1, 2] -> [1, 2, 3]" "[5, 4, 9] -> [4, 5, 9]"
 #
 # The programs are in Pipes (synth/pipes.py), a little language of list pipelines such as
-# `x |> filter(odd) |> map(* 3) |> sum`. A task is four examples of what a program does to a list of
+# `x |> filter(x % 2 == 1) |> map(3 * x + 1) |> sum`. A task is four examples of what a program does to a list of
 # digits; the model (synth_model.anvil) writes the program, and four more examples it has not seen
 # check it. The test tasks' programs never appear in the training tasks.
 

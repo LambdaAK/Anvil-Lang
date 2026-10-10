@@ -1,0 +1,14 @@
+# Draws a batch of characters for write.py: which ones (labels.npy), the noise they start from and
+# the fresh noise of each step (noise.npy, made by write.py so that a sentence can share a style),
+# and the guidance and how much fresh noise to add (guidance.npy). Saves the drawings and snapshots of them being made.
+use "../handwriting_model.anvil"
+
+labels = npy("../data/handwriting/labels.npy")
+noise = npy("../data/handwriting/noise.npy")
+guidance = npy("../data/handwriting/guidance.npy")        # [guidance, fresh]
+net = UNet()
+found = load(net, "../handwriting.weights")
+assert found == 1, "no handwriting.weights yet: run bin/anvil run --metal examples/handwriting.anvil first"
+drawn, frames = draw(net, labels, noise, guidance[0], guidance[1])
+save_npy(drawn, "../data/handwriting/drawn.npy")
+save_npy(frames, "../data/handwriting/frames.npy")
